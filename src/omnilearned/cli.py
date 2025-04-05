@@ -46,21 +46,21 @@ def train(
     # Optimizer
     b1: float = typer.Option(0.95, help="Lion b1"),
     b2: float = typer.Option(0.98, help="Lion b2"),
-    lr: float = typer.Option(5e-4, help="Learning rate"),
+    lr: float = typer.Option(5e-5, help="Learning rate"),
     lr_factor: float = typer.Option(
         0.1, help="Learning rate reduction for fine-tuning"
     ),
-    wd: float = typer.Option(0.3, help="Weight decay"),
+    wd: float = typer.Option(0.0, help="Weight decay"),
     # Model
     num_transf: int = typer.Option(6, help="Number of transformer blocks"),
     num_tokens: int = typer.Option(4, help="Number of trainable tokens"),
     num_head: int = typer.Option(8, help="Number of transformer heads"),
     K: int = typer.Option(15, help="Number of nearest neighbors"),
     radius: float = typer.Option(0.4, help="Local neighborhood radius"),
-    base_dim: int = typer.Option(64, help="Base value for dimensions"),
+    base_dim: int = typer.Option(96, help="Base value for dimensions"),
     mlp_ratio: int = typer.Option(2, help="Multiplier for MLP layers"),
-    attn_drop: float = typer.Option(0.1, help="Dropout for attention layers"),
-    mlp_drop: float = typer.Option(0.1, help="Dropout for mlp layers"),
+    attn_drop: float = typer.Option(0.0, help="Dropout for attention layers"),
+    mlp_drop: float = typer.Option(0.0, help="Dropout for mlp layers"),
     feature_drop: float = typer.Option(0.0, help="Dropout for input features"),
     num_workers: int = typer.Option(16, help="Number of workers for data loading"),
 ):
