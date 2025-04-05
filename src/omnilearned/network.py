@@ -12,7 +12,7 @@ from omnilearned.layers import (
     InputBlock,
     LayerScale,
 )
-from omnilearned.diffusion import MPFourier, perturb
+from omnilearned.diffusion import MPFourier, perturb, get_logsnr_alpha_sigma
 
 
 class PET2(nn.Module):
@@ -127,6 +127,7 @@ class PET2(nn.Module):
             None,
         )
         time = torch.rand(size=(x.shape[0],)).to(x.device)
+        _,alpha,sigma = get_logsnr_alpha_sigma(time)
         if self.mode == "generator" or self.mode == "pretrain":
             z, v = perturb(x, mask, time)
             z_body = self.body(z, cond, pid, add_info, time)
@@ -138,7 +139,7 @@ class PET2(nn.Module):
             if self.mode == "pretrain":
                 y_perturb = self.classifier(z_body)
 
-        return y_pred, y_perturb, z_pred, v, x_body, z_body
+        return y_pred, y_perturb, z_pred, v, x_body, z_body, alpha**2
 
 
 class PET_classifier(nn.Module):
@@ -485,10 +486,8 @@ class PET_body(nn.Module):
         x = torch.cat([token, x], 1)
         mask = torch.cat([torch.ones_like(mask[:, : self.num_tokens]), mask], 1)
 
-        # x_init = x
         for ib, blk in enumerate(self.in_blocks):
             x = x + self.in_scales[ib](blk(x, mask=mask, x_int=x_int))
 
-        # x = x + x_init
         x = self.norm(x) * mask
         return x

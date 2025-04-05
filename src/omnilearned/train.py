@@ -69,7 +69,7 @@ def train_step(
             "cuda:{}".format(device) if torch.cuda.is_available() else "cpu",
             enabled=use_amp,
         ):
-            y_pred, y_perturb, z_pred, v, x_body, z_body = model(X, y, **model_kwargs)
+            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(X, y, **model_kwargs)
 
             loss = 0
             if y_pred is not None:
@@ -82,7 +82,7 @@ def train_step(
                 logs["loss_gen"] += loss_gen.detach()
             if y_perturb is not None:
                 loss_perturb = class_cost(y_perturb.squeeze(), y)
-                loss = loss + loss_perturb
+                loss = loss + alpha*loss_perturb
                 logs["loss_perturb"] += loss_perturb.detach()
             if use_clip and z_body is not None and x_body is not None:
                 loss_clip = clip_loss(
@@ -99,6 +99,7 @@ def train_step(
             gscaler.update()
         else:
             loss.backward()  # Backward pass
+            torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
             optimizer.step()  # Update parameters
         scheduler.step()
 
@@ -151,7 +152,7 @@ def test_step(
             if key in batch
         }
         with torch.no_grad():
-            y_pred, y_perturb, z_pred, v, x_body, z_body = model(X, y, **model_kwargs)
+            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(X, y, **model_kwargs)
 
         loss = 0
         if y_pred is not None:
@@ -164,7 +165,7 @@ def test_step(
             logs["loss_gen"] += loss_gen.detach()
         if y_perturb is not None:
             loss_perturb = class_cost(y_perturb.squeeze(), y)
-            loss = loss + loss_perturb
+            loss = loss + alpha*loss_perturb
             logs["loss_perturb"] += loss_perturb.detach()
 
         if use_clip and z_body is not None and x_body is not None:
