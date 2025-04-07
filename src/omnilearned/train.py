@@ -72,8 +72,9 @@ def train_step(
             y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(X, y, **model_kwargs)
 
             loss = 0
+
             if y_pred is not None:
-                loss_class = class_cost(y_pred.squeeze(), y)
+                loss_class = class_cost(y_pred.squeeze(), y).mean()
                 loss = loss + loss_class
                 logs["loss_class"] += loss_class.detach()
             if z_pred is not None:
@@ -81,8 +82,8 @@ def train_step(
                 loss = loss + loss_gen
                 logs["loss_gen"] += loss_gen.detach()
             if y_perturb is not None:
-                loss_perturb = class_cost(y_perturb.squeeze(), y)
-                loss = loss + alpha*loss_perturb
+                loss_perturb = (alpha.squeeze()*class_cost(y_perturb.squeeze(), y)).mean()
+                loss = loss + loss_perturb
                 logs["loss_perturb"] += loss_perturb.detach()
             if use_clip and z_body is not None and x_body is not None:
                 loss_clip = clip_loss(
@@ -92,7 +93,6 @@ def train_step(
                 logs["loss_clip"] += loss_clip.detach()
 
         logs["loss"] += loss.detach()
-
         if use_amp and gscaler is not None:
             gscaler.scale(loss).backward()
             gscaler.step(optimizer)
@@ -156,7 +156,7 @@ def test_step(
 
         loss = 0
         if y_pred is not None:
-            loss_class = class_cost(y_pred.squeeze(), y)
+            loss_class = class_cost(y_pred.squeeze(), y).mean()
             loss = loss + loss_class
             logs["loss_class"] += loss_class.detach()
         if z_pred is not None:
@@ -164,8 +164,8 @@ def test_step(
             loss = loss + loss_gen
             logs["loss_gen"] += loss_gen.detach()
         if y_perturb is not None:
-            loss_perturb = class_cost(y_perturb.squeeze(), y)
-            loss = loss + alpha*loss_perturb
+            loss_perturb = (alpha.squeeze()*class_cost(y_perturb.squeeze(), y)).mean()
+            loss = loss + loss_perturb
             logs["loss_perturb"] += loss_perturb.detach()
 
         if use_clip and z_body is not None and x_body is not None:
@@ -194,7 +194,7 @@ def train_model(
     num_epochs=1,
     device="cpu",
     patience=100,
-    loss_class=nn.CrossEntropyLoss(),
+    loss_class=nn.CrossEntropyLoss(reduction='none'),
     loss_gen=nn.L1Loss(),
     use_clip=True,
     output_dir="",
@@ -273,9 +273,10 @@ def train_model(
                 "Time taken for epoch {} is {} sec".format(epoch, time.time() - start)
             )
 
-            # if losses["val_loss"][-1] < tracker["bestValLoss"]:
+            if losses["val_loss"][-1] < tracker["bestValLoss"]:
+                tracker["bestValLoss"] = losses["val_loss"][-1]
             print("replacing best checkpoint ...")
-            tracker["bestValLoss"] = losses["val_loss"][-1]
+            
             save_checkpoint(
                 model,
                 epoch + 1,
