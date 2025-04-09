@@ -10,7 +10,7 @@ from omnilearned.layers import (
     AttBlock,
     DynamicTanh,
     InputBlock,
-    LayerScale,
+    TokenAttBlock,
 )
 from omnilearned.diffusion import MPFourier, perturb, get_logsnr_alpha_sigma
 
@@ -21,6 +21,7 @@ class PET2(nn.Module):
         input_dim,
         hidden_size,
         num_transformers=2,
+        num_transformers_head=2,
         num_heads=4,
         mlp_ratio=2,
         norm_layer=DynamicTanh,
@@ -76,10 +77,13 @@ class PET2(nn.Module):
         if self.mode == "classifier" or self.mode == "pretrain":
             self.classifier = PET_classifier(
                 hidden_size,
+                num_transformers=num_transformers_head,
+                num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 norm_layer=norm_layer,
                 act_layer=act_layer,
                 mlp_drop=mlp_drop,
+                attn_drop=attn_drop,
                 num_tokens=num_tokens,
                 num_add=1 if conditional else 0,
                 num_classes=num_classes,
@@ -89,7 +93,7 @@ class PET2(nn.Module):
             self.generator = PET_generator(
                 input_dim,
                 hidden_size,
-                num_transformers=2,
+                num_transformers=num_transformers_head,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 norm_layer=norm_layer,
@@ -127,7 +131,7 @@ class PET2(nn.Module):
             None,
         )
         time = torch.rand(size=(x.shape[0],)).to(x.device)
-        _,alpha,sigma = get_logsnr_alpha_sigma(time)
+        _, alpha, sigma = get_logsnr_alpha_sigma(time)
         if self.mode == "generator" or self.mode == "pretrain":
             z, v = perturb(x, mask, time)
             z_body = self.body(z, cond, pid, add_info, time)
@@ -135,9 +139,9 @@ class PET2(nn.Module):
 
         if self.mode == "classifier" or self.mode == "pretrain":
             x_body = self.body(x, cond, pid, add_info, torch.zeros_like(time))
-            y_pred = self.classifier(x_body)
+            y_pred = self.classifier(x_body, mask)
             if self.mode == "pretrain":
-                y_perturb = self.classifier(z_body)
+                y_perturb = self.classifier(z_body, mask)
 
         return y_pred, y_perturb, z_pred, v, x_body, z_body, alpha**2
 
@@ -146,10 +150,13 @@ class PET_classifier(nn.Module):
     def __init__(
         self,
         hidden_size,
+        num_transformers=2,
+        num_heads=4,
         mlp_ratio=2,
         norm_layer=DynamicTanh,
         act_layer=nn.GELU,
         mlp_drop=0.1,
+        attn_drop=0.1,
         num_tokens=4,
         num_add=1,
         num_classes=2,
@@ -157,6 +164,23 @@ class PET_classifier(nn.Module):
         super().__init__()
         self.num_tokens = num_tokens
         self.num_add = num_add
+
+        self.in_blocks = nn.ModuleList(
+            [
+                TokenAttBlock(
+                    dim=hidden_size,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    attn_drop=attn_drop,
+                    mlp_drop=mlp_drop,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                    num_tokens=self.num_tokens + self.num_add,
+                    skip=False,
+                )
+                for _ in range(num_transformers)
+            ]
+        )
 
         self.fc = nn.Sequential(
             MLP(
@@ -186,8 +210,12 @@ class PET_classifier(nn.Module):
         # Specify parameters that should not be decayed
         return {"norm"}
 
-    def forward(self, x):
+    def forward(self, x, mask):
         B = x.shape[0]
+
+        for ib, blk in enumerate(self.in_blocks):
+            x = blk(x, mask=mask)
+
         x = self.fc(x[:, : self.num_tokens + self.num_add].reshape(B, -1))
         return self.out(x)
 
@@ -233,15 +261,12 @@ class PET_generator(nn.Module):
                     mlp_drop=mlp_drop,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
+                    num_tokens=num_add,
                     skip=False,
                     use_int=False,
                 )
                 for _ in range(num_transformers)
             ]
-        )
-
-        self.in_scales = nn.ModuleList(
-            [LayerScale(hidden_size) for _ in range(num_transformers)]
         )
 
         self.fc = nn.Sequential(
@@ -285,7 +310,7 @@ class PET_generator(nn.Module):
             x = x + label_embed.unsqueeze(1) * mask
 
         for ib, blk in enumerate(self.in_blocks):
-            x = x + self.in_scales[ib](blk(x, mask=mask))
+            x = blk(x, mask=mask)
 
         x = self.fc(x[:, self.num_add :]) * mask[:, self.num_add :]
         return self.out(x) * mask[:, self.num_add :]
@@ -405,9 +430,9 @@ class PET_body(nn.Module):
             ]
         )
 
-        self.in_scales = nn.ModuleList(
-            [LayerScale(hidden_size) for _ in range(num_transformers)]
-        )
+        # self.in_scales = nn.ModuleList(
+        #     [LayerScale(hidden_size) for _ in range(num_transformers)]
+        # )
 
         self.norm = norm_layer(hidden_size)
 
@@ -487,7 +512,8 @@ class PET_body(nn.Module):
         mask = torch.cat([torch.ones_like(mask[:, : self.num_tokens]), mask], 1)
 
         for ib, blk in enumerate(self.in_blocks):
-            x = x + self.in_scales[ib](blk(x, mask=mask, x_int=x_int))
+            x = blk(x, mask=mask, x_int=x_int)
+            # x = x + self.in_scales[ib](blk(x, mask=mask, x_int=x_int))
 
         x = self.norm(x) * mask
         return x

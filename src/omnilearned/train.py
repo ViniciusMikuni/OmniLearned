@@ -69,7 +69,9 @@ def train_step(
             "cuda:{}".format(device) if torch.cuda.is_available() else "cpu",
             enabled=use_amp,
         ):
-            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(X, y, **model_kwargs)
+            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(
+                X, y, **model_kwargs
+            )
 
             loss = 0
 
@@ -82,7 +84,9 @@ def train_step(
                 loss = loss + loss_gen
                 logs["loss_gen"] += loss_gen.detach()
             if y_perturb is not None:
-                loss_perturb = (alpha.squeeze()*class_cost(y_perturb.squeeze(), y)).mean()
+                loss_perturb = (
+                    alpha.squeeze() * class_cost(y_perturb.squeeze(), y)
+                ).mean()
                 loss = loss + loss_perturb
                 logs["loss_perturb"] += loss_perturb.detach()
             if use_clip and z_body is not None and x_body is not None:
@@ -99,7 +103,7 @@ def train_step(
             gscaler.update()
         else:
             loss.backward()  # Backward pass
-            torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()  # Update parameters
         scheduler.step()
 
@@ -152,7 +156,9 @@ def test_step(
             if key in batch
         }
         with torch.no_grad():
-            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(X, y, **model_kwargs)
+            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(
+                X, y, **model_kwargs
+            )
 
         loss = 0
         if y_pred is not None:
@@ -164,7 +170,7 @@ def test_step(
             loss = loss + loss_gen
             logs["loss_gen"] += loss_gen.detach()
         if y_perturb is not None:
-            loss_perturb = (alpha.squeeze()*class_cost(y_perturb.squeeze(), y)).mean()
+            loss_perturb = (alpha.squeeze() * class_cost(y_perturb.squeeze(), y)).mean()
             loss = loss + loss_perturb
             logs["loss_perturb"] += loss_perturb.detach()
 
@@ -194,7 +200,7 @@ def train_model(
     num_epochs=1,
     device="cpu",
     patience=100,
-    loss_class=nn.CrossEntropyLoss(reduction='none'),
+    loss_class=nn.CrossEntropyLoss(reduction="none"),
     loss_gen=nn.L1Loss(),
     use_clip=True,
     output_dir="",
@@ -276,7 +282,7 @@ def train_model(
             if losses["val_loss"][-1] < tracker["bestValLoss"]:
                 tracker["bestValLoss"] = losses["val_loss"][-1]
             print("replacing best checkpoint ...")
-            
+
             save_checkpoint(
                 model,
                 epoch + 1,

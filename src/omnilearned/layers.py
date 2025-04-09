@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+import einops
+import math
+import torch.nn.functional as F
 
 
 class LayerScale(nn.Module):
@@ -461,6 +464,8 @@ class AttBlock(nn.Module):
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
         self.num_tokens = num_tokens
+        # self.attn = Attention(dim,num_heads,attn_drop=attn_drop)
+
         self.attn = nn.MultiheadAttention(
             embed_dim=dim,
             num_heads=num_heads,
@@ -503,6 +508,7 @@ class AttBlock(nn.Module):
         x = (
             x
             + self.attn(
+                # x_norm,attn_mask)
                 query=x_norm,
                 key=x_norm,
                 value=x_norm,
@@ -513,4 +519,174 @@ class AttBlock(nn.Module):
             * mask
         )
         x = x + self.mlp(self.norm2(x), mask)
+        return x
+
+
+class TokenAttBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        attn_drop=0.0,
+        mlp_drop=0.0,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        num_tokens=1,
+        skip=False,
+    ):
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.norm2 = norm_layer(dim)
+        self.num_tokens = num_tokens
+        # self.attn = Attention(dim,num_heads,attn_drop=attn_drop)
+
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            dropout=attn_drop,
+            bias=False,
+            batch_first=True,
+        )
+
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = MLP(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=mlp_drop,
+            norm_layer=norm_layer,
+        )
+
+        self.skip_linear = nn.Linear(2 * dim, dim) if skip else None
+        self.num_heads = num_heads
+
+    def forward(self, x, mask=None, skip=None):
+        if self.skip_linear is not None and skip is not None:
+            x = self.skip_linear(torch.cat([x, skip], dim=-1)) * mask
+
+        x_norm = self.norm1(x)
+
+        tokens = x[:, : self.num_tokens]
+        x = x[:, self.num_tokens :]
+
+        tokens = (
+            tokens
+            + self.attn(
+                # x_norm,attn_mask)
+                query=x_norm[:, : self.num_tokens],
+                key=x_norm[:, self.num_tokens :],
+                value=x_norm[:, self.num_tokens :],
+                key_padding_mask=~mask[:, :, 0],
+                need_weights=False,
+            )[0]
+        )
+        tokens = tokens + self.mlp(self.norm2(tokens))
+        return torch.cat([tokens, x], 1)
+
+
+class ScalableSoftmax(nn.Module):
+    """Scalable-Softmax (SSMax) implementation from the paper
+    'Scalable-Softmax Is Superior for Attention'.
+
+    This is a drop-in replacement for standard Softmax that helps prevent attention
+    fading in transformers by incorporating input size scaling. The scaling helps
+    maintain focused attention distributions even with large input sizes.
+
+    Args:
+        s (float, optional): Scaling parameter that controls attention focusing strength.
+            Lower values (e.g. 0.1) produce sharper attention, higher values (e.g. 1.0)
+            produce softer attention. Default: 0.43 as used in paper.
+        learn_scaling (bool, optional): If True, make scaling parameter learnable.
+            Default: True
+        bias (bool, optional): If True, adds a learnable bias term. The paper found
+            that while bias helps training, it can hurt length generalization.
+            Default: False
+
+    Shape:
+        - Input: (*, N) where * is any number of dimensions and N is the sequence length
+        - Output: Same shape as input
+    """
+
+    def __init__(self, s: float = 0.43, learn_scaling: bool = True, bias: bool = False):
+        super().__init__()
+
+        # Initialize scaling parameter
+        if learn_scaling:
+            self.s = nn.Parameter(torch.tensor(s, dtype=torch.float))
+        else:
+            self.register_buffer("s", torch.tensor(s, dtype=torch.float))
+
+        # Optional bias parameter
+        self.has_bias = bias
+        if bias:
+            self.b = nn.Parameter(torch.zeros(1))
+
+    def forward(
+        self, x: torch.Tensor, attn_mask: torch.Tensor, dim: int = -1
+    ) -> torch.Tensor:
+        """Forward pass applying SSMax along specified dimension.
+
+        Args:
+            x (torch.Tensor): Input tensor
+            dim (int): Dimension along which to apply SSMax. Default: -1
+
+        Returns:
+            torch.Tensor: Output tensor with same shape as input
+        """
+
+        # Apply scaling factor based on input size
+        scale = self.s * math.log(x.size(dim))
+        if self.has_bias:
+            scale += self.b
+
+        return F.softmax(x.mul(scale) + attn_mask, dim=dim)
+
+    def extra_repr(self) -> str:
+        """String representation of module."""
+        s_val = self.s.item()
+        if self.has_bias:
+            return f"s={s_val:.3f}, b={self.b.item():.3f}"
+        return f"s={s_val:.3f}, bias=False"
+
+
+class Attention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        qkv_bias=False,
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim**-0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.ssmax = ScalableSoftmax(
+            s=0.4,  # scaling parameter
+            learn_scaling=True,  # make scaling parameter learnable
+            bias=False,  # whether to use bias term
+        )
+
+    def forward(self, x, attn_mask=None):
+        B, L, C = x.shape
+
+        qkv = self.qkv(x)
+        qkv = einops.rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # B H L D
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = self.ssmax(attn, attn_mask.reshape((B, self.num_heads, L, L)))
+        # attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, L, C)
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
         return x
