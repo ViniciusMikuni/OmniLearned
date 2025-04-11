@@ -18,12 +18,12 @@ def test_download(test_dataset_name, test_dataset_file_paths):
         assert result.exit_code == 0, f"Error: {result.stdout} {result.stderr}"
 
         # Assert the top exists
-        assert (
-            temp_dir / test_dataset_name
-        ).exists(), f"Top dataset not found in {temp_dir}"
+        assert (temp_dir / test_dataset_name).exists(), (
+            f"Top dataset not found in {temp_dir}"
+        )
 
         # Assert the dataset paths exist
         for path in test_dataset_file_paths:
-            assert (
-                temp_dir / path
-            ).exists(), f"Dataset path {path} not found in {temp_dir}"
+            assert (temp_dir / path).exists(), (
+                f"Dataset path {path} not found in {temp_dir}"
+            )

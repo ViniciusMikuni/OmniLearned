@@ -174,7 +174,6 @@ def dataloader(
         "./", "--folder", "-f", help="Folder to save the dataset"
     ),
 ):
-
     for tag in ["train", "test", "val"]:
         load_data(dataset, folder, dataset_type=tag, distributed=False)
 

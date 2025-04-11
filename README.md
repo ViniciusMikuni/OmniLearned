@@ -38,6 +38,6 @@ For multiple GPUs and SLURM you can use the ```train.sh``` example script
 To lint the code, run:
 
 ```bash
-black .
+ruff format .
 ruff check --fix .
 ```

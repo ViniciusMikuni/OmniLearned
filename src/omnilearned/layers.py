@@ -328,7 +328,6 @@ class LocalEmbeddingBlock(nn.Module):
         return D
 
     def forward(self, points, features, mask, indices=None):
-
         batch_size, num_points, num_dims = features.shape
         if indices is None:
             distances = self.pairwise_distance(

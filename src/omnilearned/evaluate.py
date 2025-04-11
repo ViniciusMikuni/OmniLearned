@@ -1,7 +1,4 @@
-import json
-import numpy as np
 import torch
-import torch.nn as nn
 from omnilearned.network import PET2
 from omnilearned.dataloader import load_data
 import torch.distributed as dist
@@ -10,21 +7,21 @@ from omnilearned.utils import (
     is_master_node,
     ddp_setup,
     get_checkpoint_name,
-    print_metrics
+    print_metrics,
 )
-import time
 import os
 from tqdm import tqdm
+
 
 def eval_model(
     model,
     val_loader,
     device="cpu",
 ):
-    prediction, mass,labels = test_step(model,val_loader,device)
-    print_metrics(prediction,labels)
-    #np.savez("outputs.npz", prediction=prediction, mass=mass)
-    
+    prediction, mass, labels = test_step(model, val_loader, device)
+    print_metrics(prediction, labels)
+    # np.savez("outputs.npz", prediction=prediction, mass=mass)
+
 
 def test_step(
     model,
@@ -37,9 +34,10 @@ def test_step(
     labels = []
     masses = []
     data_iter = iter(dataloader)
-    
+
     for batch_idx in tqdm(range(len(dataloader)), desc="Processing batches"):
-        if batch_idx > 10000:break
+        if batch_idx > 10000:
+            break
         batch = next(data_iter)
 
         # for batch_idx, batch in enumerate(dataloader):
@@ -56,10 +54,13 @@ def test_step(
 
         preds.append(y_pred.softmax(-1))
         labels.append(y)
-        masses.append(torch.exp(batch['cond'][:,1]))
-    return torch.cat(preds).cpu().detach().numpy(), torch.cat(masses).cpu().detach().numpy(), torch.cat(labels).cpu().detach().numpy()
+        masses.append(torch.exp(batch["cond"][:, 1]))
+    return (
+        torch.cat(preds).cpu().detach().numpy(),
+        torch.cat(masses).cpu().detach().numpy(),
+        torch.cat(labels).cpu().detach().numpy(),
+    )
 
-    
 
 def restore_checkpoint(
     model,
@@ -78,16 +79,11 @@ def restore_checkpoint(
     base_model.to(device)
     base_model.body.load_state_dict(checkpoint["body"])
 
-
     if base_model.classifier is not None and "classifier_head" in checkpoint:
-        base_model.classifier.load_state_dict(
-            checkpoint["classifier_head"]
-        )
+        base_model.classifier.load_state_dict(checkpoint["classifier_head"])
 
     if base_model.generator is not None:
-        base_model.generator.load_state_dict(
-            checkpoint["generator_head"]
-        )
+        base_model.generator.load_state_dict(checkpoint["generator_head"])
 
 
 def run(
@@ -113,7 +109,6 @@ def run(
     feature_drop: float = 0.0,
     num_workers: int = 16,
 ):
-
     local_rank, rank, size = ddp_setup()
     # set up model
     model = PET2(
@@ -162,12 +157,10 @@ def run(
         print(f"Train dataset len: {len(val_loader)}")
         print("************")
 
-
-    
     if os.path.isfile(os.path.join(indir, get_checkpoint_name(save_tag))):
         if is_master_node():
             print(
-                f"Loading checkpoint from {os.path.join(indir,get_checkpoint_name(save_tag))}"
+                f"Loading checkpoint from {os.path.join(indir, get_checkpoint_name(save_tag))}"
             )
 
         restore_checkpoint(
@@ -178,8 +171,10 @@ def run(
         )
 
     else:
-        raise ValueError(f"Error loading checkpoint: {os.path.join(indir,get_checkpoint_name(save_tag))}")
-        
+        raise ValueError(
+            f"Error loading checkpoint: {os.path.join(indir, get_checkpoint_name(save_tag))}"
+        )
+
     # Transfer model to GPU if available
     kwarg = {}
     if torch.cuda.is_available():
@@ -194,7 +189,6 @@ def run(
         model,
         **kwarg,
     )
-    
-    run = None
-    eval_model(model,val_loader,device=device)
+
+    eval_model(model, val_loader, device=device)
     dist.destroy_process_group()

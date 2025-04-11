@@ -11,7 +11,6 @@ import torch.nn.functional as F
 
 
 def print_metrics(y_preds_np, y_np, thresholds=[0.3, 0.5], background_class=0):
-
     # Compute multiclass AUC
     auc_ovo = metrics.roc_auc_score(
         y_np,

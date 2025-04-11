@@ -211,7 +211,6 @@ def train_model(
     use_amp=False,
     run=None,
 ):
-
     checkpoint_name = get_checkpoint_name(save_tag)
 
     losses = {
@@ -261,19 +260,19 @@ def train_model(
 
         if is_master_node():
             print(
-                f'Epoch [{epoch+1}/{num_epochs}] Loss: {losses["train_loss"][-1]:.4f}, Val Loss: {losses["val_loss"][-1]:.4f} , lr: {lr_scheduler.get_last_lr()[0]}'
+                f"Epoch [{epoch + 1}/{num_epochs}] Loss: {losses['train_loss'][-1]:.4f}, Val Loss: {losses['val_loss'][-1]:.4f} , lr: {lr_scheduler.get_last_lr()[0]}"
             )
             print(
-                f'Class Loss: {train_logs["loss_class"]:.4f}, Class Val Loss: {val_logs["loss_class"]:.4f}'
+                f"Class Loss: {train_logs['loss_class']:.4f}, Class Val Loss: {val_logs['loss_class']:.4f}"
             )
             print(
-                f'Gen Loss: {train_logs["loss_gen"]:.4f}, Gen Val Loss: {val_logs["loss_gen"]:.4f}'
+                f"Gen Loss: {train_logs['loss_gen']:.4f}, Gen Val Loss: {val_logs['loss_gen']:.4f}"
             )
             print(
-                f'Class Perturb Loss: {train_logs["loss_perturb"]:.4f}, Class Val Perturb Loss: {val_logs["loss_perturb"]:.4f}'
+                f"Class Perturb Loss: {train_logs['loss_perturb']:.4f}, Class Val Perturb Loss: {val_logs['loss_perturb']:.4f}"
             )
             print(
-                f'CLIP loss: {train_logs["loss_clip"]:.4f}, CLIP Val Loss: {val_logs["loss_clip"]:.4f}'
+                f"CLIP loss: {train_logs['loss_clip']:.4f}, CLIP Val Loss: {val_logs['loss_clip']:.4f}"
             )
             print(
                 "Time taken for epoch {} is {} sec".format(epoch, time.time() - start)
@@ -332,7 +331,7 @@ def save_checkpoint(
 
     torch.save(save_dict, os.path.join(checkpoint_dir, checkpoint_name))
     print(
-        f"Epoch {epoch} | Training checkpoint saved at {os.path.join(checkpoint_dir,checkpoint_name)}"
+        f"Epoch {epoch} | Training checkpoint saved at {os.path.join(checkpoint_dir, checkpoint_name)}"
     )
 
 
@@ -451,7 +450,6 @@ def run(
     feature_drop: float = 0.0,
     num_workers: int = 16,
 ):
-
     local_rank, rank, size = ddp_setup()
     # set up model
     model = PET2(
@@ -527,7 +525,7 @@ def run(
     if os.path.isfile(os.path.join(outdir, get_checkpoint_name(save_tag))) and resuming:
         if is_master_node():
             print(
-                f"Continue training with checkpoint from {os.path.join(outdir,get_checkpoint_name(save_tag))}"
+                f"Continue training with checkpoint from {os.path.join(outdir, get_checkpoint_name(save_tag))}"
             )
 
         epoch_init, loss_init = restore_checkpoint(
@@ -545,7 +543,7 @@ def run(
     ):
         if is_master_node():
             print(
-                f"Will fine-tune using checkpoint {os.path.join(outdir,get_checkpoint_name(pretrain_tag))}"
+                f"Will fine-tune using checkpoint {os.path.join(outdir, get_checkpoint_name(pretrain_tag))}"
             )
 
         epoch_init, loss_init = restore_checkpoint(
