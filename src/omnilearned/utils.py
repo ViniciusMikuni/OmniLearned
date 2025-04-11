@@ -11,7 +11,6 @@ import torch.nn.functional as F
 
 
 def print_metrics(y_preds, y, thresholds=[0.3, 0.5], background_class=0):
-
     y_preds_np = F.softmax(y_preds, -1).detach().cpu().numpy()
     y_np = y.detach().cpu().numpy()
 

@@ -59,7 +59,6 @@ def collate_point_cloud(batch):
 
 
 def get_url(dataset_name, dataset_type, base_url="https://portal.nersc.gov/cfs/m4567/"):
-
     url = f"{base_url}/{dataset_name}/{dataset_type}/"
     try:
         requests.head(url, allow_redirects=True, timeout=5)
@@ -184,7 +183,6 @@ def load_data(
     rank=0,
     size=1,
 ):
-
     supported_datasets = [
         "top",
         "qg",
