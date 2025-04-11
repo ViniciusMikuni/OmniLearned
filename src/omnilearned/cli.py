@@ -1,6 +1,7 @@
 import typer
 
 from omnilearned.train import run as run_training
+from omnilearned.evaluate import run as run_evaluation
 from omnilearned.dataloader import load_data
 
 app = typer.Typer(
@@ -87,6 +88,69 @@ def train(
         lr,
         lr_factor,
         wd,
+        num_transf,
+        num_tokens,
+        num_head,
+        K,
+        radius,
+        base_dim,
+        mlp_ratio,
+        attn_drop,
+        mlp_drop,
+        feature_drop,
+        num_workers,
+    )
+
+
+@app.command()
+def evaluate(
+    # General Options
+    indir: str = typer.Option(
+        "", "--input_dir", "-i", help="Directory to input best model"
+    ),
+    save_tag: str = typer.Option("", help="Extra tag for checkpoint model"),
+    dataset: str = typer.Option("top", help="Dataset to load"),
+    path: str = typer.Option(
+        "/pscratch/sd/v/vmikuni/PET/datasets", help="Dataset path"
+    ),
+    # Model Options
+    use_pid: bool = typer.Option(False, help="Use particle ID for training"),
+    use_add: bool = typer.Option(
+        False, help="Use additional features beyond kinematic information"
+    ),
+    use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
+    num_classes: int = typer.Option(
+        2, help="Number of classes in the classification task"
+    ),
+    mode: str = typer.Option(
+        "classifier", help="Task to run: classifier, generator, pretrain"
+    ),
+    # Training options
+    batch: int = typer.Option(64, help="Batch size"),
+    # Model
+    num_transf: int = typer.Option(6, help="Number of transformer blocks"),
+    num_tokens: int = typer.Option(4, help="Number of trainable tokens"),
+    num_head: int = typer.Option(8, help="Number of transformer heads"),
+    K: int = typer.Option(15, help="Number of nearest neighbors"),
+    radius: float = typer.Option(0.4, help="Local neighborhood radius"),
+    base_dim: int = typer.Option(96, help="Base value for dimensions"),
+    mlp_ratio: int = typer.Option(2, help="Multiplier for MLP layers"),
+    attn_drop: float = typer.Option(0.0, help="Dropout for attention layers"),
+    mlp_drop: float = typer.Option(0.0, help="Dropout for mlp layers"),
+    feature_drop: float = typer.Option(0.0, help="Dropout for input features"),
+    num_workers: int = typer.Option(16, help="Number of workers for data loading"),
+):
+    run_evaluation(
+        indir,
+        save_tag,
+        dataset,
+        path,
+        use_pid,
+        use_add,
+        use_clip,
+        num_classes,
+        mode,
+        batch,
         num_transf,
         num_tokens,
         num_head,

@@ -1,0 +1,200 @@
+import json
+import numpy as np
+import torch
+import torch.nn as nn
+from omnilearned.network import PET2
+from omnilearned.dataloader import load_data
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from omnilearned.utils import (
+    is_master_node,
+    ddp_setup,
+    get_checkpoint_name,
+    print_metrics
+)
+import time
+import os
+from tqdm import tqdm
+
+def eval_model(
+    model,
+    val_loader,
+    device="cpu",
+):
+    prediction, mass,labels = test_step(model,val_loader,device)
+    print_metrics(prediction,labels)
+    #np.savez("outputs.npz", prediction=prediction, mass=mass)
+    
+
+def test_step(
+    model,
+    dataloader,
+    device,
+):
+    model.eval()
+
+    preds = []
+    labels = []
+    masses = []
+    data_iter = iter(dataloader)
+    
+    for batch_idx in tqdm(range(len(dataloader)), desc="Processing batches"):
+        if batch_idx > 10000:break
+        batch = next(data_iter)
+
+        # for batch_idx, batch in enumerate(dataloader):
+        X, y = batch["X"].to(device, dtype=torch.float), batch["y"].to(device)
+        model_kwargs = {
+            key: (batch[key].to(device) if batch[key] is not None else None)
+            for key in ["cond", "pid", "add_info"]
+            if key in batch
+        }
+        with torch.no_grad():
+            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(
+                X, y, **model_kwargs
+            )
+
+        preds.append(y_pred.softmax(-1))
+        labels.append(y)
+        masses.append(torch.exp(batch['cond'][:,1]))
+    return torch.cat(preds).cpu().detach().numpy(), torch.cat(masses).cpu().detach().numpy(), torch.cat(labels).cpu().detach().numpy()
+
+    
+
+def restore_checkpoint(
+    model,
+    checkpoint_dir,
+    checkpoint_name,
+    device,
+    is_main_node=False,
+):
+    device = "cuda:{}".format(device) if torch.cuda.is_available() else "cpu"
+    checkpoint = torch.load(
+        os.path.join(checkpoint_dir, checkpoint_name),
+        map_location=device,
+    )
+
+    base_model = model.module if hasattr(model, "module") else model
+    base_model.to(device)
+    base_model.body.load_state_dict(checkpoint["body"])
+
+
+    if base_model.classifier is not None and "classifier_head" in checkpoint:
+        base_model.classifier.load_state_dict(
+            checkpoint["classifier_head"]
+        )
+
+    if base_model.generator is not None:
+        base_model.generator.load_state_dict(
+            checkpoint["generator_head"]
+        )
+
+
+def run(
+    indir: str = "",
+    save_tag: str = "",
+    dataset: str = "top",
+    path: str = "/pscratch/sd/v/vmikuni/PET/datasets",
+    use_pid: bool = False,
+    use_add: bool = False,
+    use_clip: bool = False,
+    num_classes: int = 2,
+    mode: str = "classifier",
+    batch: int = 64,
+    num_transf: int = 6,
+    num_tokens: int = 4,
+    num_head: int = 8,
+    K: int = 15,
+    radius: float = 0.4,
+    base_dim: int = 64,
+    mlp_ratio: int = 2,
+    attn_drop: float = 0.1,
+    mlp_drop: float = 0.1,
+    feature_drop: float = 0.0,
+    num_workers: int = 16,
+):
+
+    local_rank, rank, size = ddp_setup()
+    # set up model
+    model = PET2(
+        input_dim=4,
+        hidden_size=base_dim,
+        num_transformers=num_transf,
+        num_heads=num_head,
+        attn_drop=attn_drop,
+        mlp_drop=mlp_drop,
+        mlp_ratio=mlp_ratio,
+        feature_drop=feature_drop,
+        num_tokens=num_tokens,
+        K=K,
+        cut=radius,
+        conditional=True,
+        use_time=True,
+        pid=use_pid,
+        num_classes=num_classes,
+        mode=mode,
+    )
+
+    if rank == 0:
+        d = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        print("**** Setup ****")
+        print(
+            "Total params: %.2fM"
+            % (sum(p.numel() for p in model.parameters()) / 1000000.0)
+        )
+        print(f"Evaluating on device: {d}, with {size} GPUs")
+        print("************")
+
+    # load in train data
+    val_loader = load_data(
+        dataset,
+        dataset_type="test",
+        use_pid=use_pid,
+        use_add=use_add,
+        path=path,
+        batch=batch,
+        num_workers=num_workers,
+        rank=rank,
+        size=size,
+    )
+    if rank == 0:
+        print("**** Setup ****")
+        print(f"Train dataset len: {len(val_loader)}")
+        print("************")
+
+
+    
+    if os.path.isfile(os.path.join(indir, get_checkpoint_name(save_tag))):
+        if is_master_node():
+            print(
+                f"Loading checkpoint from {os.path.join(indir,get_checkpoint_name(save_tag))}"
+            )
+
+        restore_checkpoint(
+            model,
+            indir,
+            get_checkpoint_name(save_tag),
+            local_rank,
+        )
+
+    else:
+        raise ValueError(f"Error loading checkpoint: {os.path.join(indir,get_checkpoint_name(save_tag))}")
+        
+    # Transfer model to GPU if available
+    kwarg = {}
+    if torch.cuda.is_available():
+        device = local_rank
+        model.to(local_rank)
+        kwarg["device_ids"] = [device]
+    else:
+        model.cpu()
+        device = "cpu"
+
+    model = DDP(
+        model,
+        **kwarg,
+    )
+    
+    run = None
+    eval_model(model,val_loader,device=device)
+    dist.destroy_process_group()

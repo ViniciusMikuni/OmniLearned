@@ -10,10 +10,7 @@ from torch.distributed import init_process_group, get_rank
 import torch.nn.functional as F
 
 
-def print_metrics(y_preds, y, thresholds=[0.3, 0.5], background_class=0):
-
-    y_preds_np = F.softmax(y_preds, -1).detach().cpu().numpy()
-    y_np = y.detach().cpu().numpy()
+def print_metrics(y_preds_np, y_np, thresholds=[0.3, 0.5], background_class=0):
 
     # Compute multiclass AUC
     auc_ovo = metrics.roc_auc_score(
@@ -23,7 +20,7 @@ def print_metrics(y_preds, y, thresholds=[0.3, 0.5], background_class=0):
     )
     print(f"AUC: {auc_ovo:.4f}\n")
 
-    num_classes = y_preds.shape[1]
+    num_classes = y_preds_np.shape[1]
 
     for signal_class in range(num_classes):
         if signal_class == background_class:
