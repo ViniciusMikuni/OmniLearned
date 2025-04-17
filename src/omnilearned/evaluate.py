@@ -7,20 +7,19 @@ from omnilearned.utils import (
     is_master_node,
     ddp_setup,
     get_checkpoint_name,
-    print_metrics,
 )
 import os
 from tqdm import tqdm
-
+import numpy as np
 
 def eval_model(
     model,
     val_loader,
     device="cpu",
 ):
-    prediction, mass, labels = test_step(model, val_loader, device)
-    print_metrics(prediction, labels)
-    # np.savez("outputs.npz", prediction=prediction, mass=mass)
+    prediction, mass, pt, labels = test_step(model, val_loader, device)
+    #print_metrics(prediction, labels)
+    np.savez("outputs_qcd.npz", prediction=prediction, mass=mass,pt=pt)
 
 
 def test_step(
@@ -33,10 +32,11 @@ def test_step(
     preds = []
     labels = []
     masses = []
+    pts = []
     data_iter = iter(dataloader)
 
     for batch_idx in tqdm(range(len(dataloader)), desc="Processing batches"):
-        if batch_idx > 10000:
+        if batch_idx > 100000:
             break
         batch = next(data_iter)
 
@@ -55,9 +55,11 @@ def test_step(
         preds.append(y_pred.softmax(-1))
         labels.append(y)
         masses.append(torch.exp(batch["cond"][:, 1]))
+        pts.append(torch.exp(batch["cond"][:, 0]))
     return (
         torch.cat(preds).cpu().detach().numpy(),
         torch.cat(masses).cpu().detach().numpy(),
+        torch.cat(pts).cpu().detach().numpy(),
         torch.cat(labels).cpu().detach().numpy(),
     )
 
@@ -90,9 +92,14 @@ def run(
     indir: str = "",
     save_tag: str = "",
     dataset: str = "top",
-    path: str = "/pscratch/sd/v/vmikuni/PET/datasets",
+    path: str = "/pscratch/sd/v/vmikuni/datasets",
+    num_feat: int = 4,
+    conditional: bool= False,
+    num_cond: int = 3,        
     use_pid: bool = False,
+    pid_idx: int = -1,
     use_add: bool = False,
+    num_add: int = 4,
     use_clip: bool = False,
     num_classes: int = 2,
     mode: str = "classifier",
@@ -112,22 +119,25 @@ def run(
     local_rank, rank, size = ddp_setup()
     # set up model
     model = PET2(
-        input_dim=4,
+        input_dim=num_feat,
         hidden_size=base_dim,
         num_transformers=num_transf,
         num_heads=num_head,
-        attn_drop=attn_drop,
-        mlp_drop=mlp_drop,
         mlp_ratio=mlp_ratio,
+        mlp_drop=mlp_drop,
+        attn_drop=attn_drop,
         feature_drop=feature_drop,
         num_tokens=num_tokens,
         K=K,
-        cut=radius,
-        conditional=True,
-        use_time=True,
+        conditional=conditional,
+        cond_dim=num_cond,
         pid=use_pid,
-        num_classes=num_classes,
+        add_info=use_add,
+        add_dim = num_add,
+        cut=radius,        
+        use_time=True,
         mode=mode,
+        num_classes=num_classes,
     )
 
     if rank == 0:
@@ -143,9 +153,11 @@ def run(
     # load in train data
     val_loader = load_data(
         dataset,
-        dataset_type="test",
+        dataset_type="val",
         use_pid=use_pid,
+        pid_idx=pid_idx,
         use_add=use_add,
+        num_add=num_add,
         path=path,
         batch=batch,
         num_workers=num_workers,
@@ -156,7 +168,6 @@ def run(
         print("**** Setup ****")
         print(f"Train dataset len: {len(val_loader)}")
         print("************")
-
     if os.path.isfile(os.path.join(indir, get_checkpoint_name(save_tag))):
         if is_master_node():
             print(

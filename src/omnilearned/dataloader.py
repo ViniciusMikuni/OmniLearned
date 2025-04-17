@@ -102,7 +102,7 @@ class HEPDataset(Dataset):
         file_paths,
         file_indices=None,
         use_pid=False,
-        pid_idx=-1,
+        pid_idx=4,
         use_add=False,
         num_add=4,
         label_shift=0,
@@ -193,6 +193,7 @@ def load_data(
         "jetclass2",
         "h1",
         "toy",
+        "qcd",
     ]
     if dataset_name not in supported_datasets:
         raise ValueError(
