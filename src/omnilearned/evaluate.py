@@ -9,18 +9,42 @@ from omnilearned.utils import (
     get_checkpoint_name,
 )
 import os
-from tqdm import tqdm
 import numpy as np
+import time
+
+
+def gather_tensors(x):
+    """
+    If running under DDP, all_gather x from every rank, concat, then return as numpy.
+    Otherwise just .cpu().numpy().
+    """
+    if dist.is_initialized():
+        ws = dist.get_world_size()
+        # pre‐allocate one buffer per rank
+        buf = [torch.zeros_like(x) for _ in range(ws)]
+        dist.all_gather(buf, x)
+        x = torch.cat(buf, dim=0)
+    return x.cpu().numpy()
 
 
 def eval_model(
     model,
     val_loader,
+    dataset,
     device="cpu",
 ):
+    start = time.time()
     prediction, mass, pt, labels = test_step(model, val_loader, device)
+
+    if dist.is_initialized():
+        prediction, mass, pt, labels = [
+            gather_tensors(t) for t in (prediction, mass, pt, labels)
+        ]
+
     # print_metrics(prediction, labels)
-    np.savez("outputs_qcd.npz", prediction=prediction, mass=mass, pt=pt)
+    if is_master_node():
+        print("Time taken for evaluation is {} sec".format(time.time() - start))
+        np.savez(f"outputs_{dataset}.npz", prediction=prediction, mass=mass, pt=pt)
 
 
 def test_step(
@@ -34,13 +58,8 @@ def test_step(
     labels = []
     masses = []
     pts = []
-    data_iter = iter(dataloader)
 
-    for batch_idx in tqdm(range(len(dataloader)), desc="Processing batches"):
-        if batch_idx > 100000:
-            break
-        batch = next(data_iter)
-
+    for batch in dataloader:
         # for batch_idx, batch in enumerate(dataloader):
         X, y = batch["X"].to(device, dtype=torch.float), batch["y"].to(device)
         model_kwargs = {
@@ -57,11 +76,12 @@ def test_step(
         labels.append(y)
         masses.append(torch.exp(batch["cond"][:, 1]))
         pts.append(torch.exp(batch["cond"][:, 0]))
+
     return (
-        torch.cat(preds).cpu().detach().numpy(),
-        torch.cat(masses).cpu().detach().numpy(),
-        torch.cat(pts).cpu().detach().numpy(),
-        torch.cat(labels).cpu().detach().numpy(),
+        torch.cat(preds).to(device),
+        torch.cat(masses).to(device),
+        torch.cat(pts).to(device),
+        torch.cat(labels).to(device),
     )
 
 
@@ -202,5 +222,5 @@ def run(
         **kwarg,
     )
 
-    eval_model(model, val_loader, device=device)
+    eval_model(model, val_loader, dataset, device=device)
     dist.destroy_process_group()

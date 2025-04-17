@@ -84,14 +84,16 @@ def train_step(
                 loss = loss + loss_gen
                 logs["loss_gen"] += loss_gen.detach()
             if y_perturb is not None:
-                loss_perturb = (
+                loss_perturb = torch.mean(
                     alpha.squeeze() * class_cost(y_perturb.squeeze(), y)
-                ).mean()
+                )
                 loss = loss + loss_perturb
                 logs["loss_perturb"] += loss_perturb.detach()
             if use_clip and z_body is not None and x_body is not None:
                 loss_clip = clip_loss(
-                    x_body.view(X.shape[0], -1), z_body.view(X.shape[0], -1)
+                    x_body.view(X.shape[0], -1),
+                    z_body.view(X.shape[0], -1),
+                    weight=alpha,
                 )
                 loss = loss + loss_clip
                 logs["loss_clip"] += loss_clip.detach()
@@ -176,7 +178,9 @@ def test_step(
 
         if use_clip and z_body is not None and x_body is not None:
             loss_clip = clip_loss(
-                x_body.view(X.shape[0], -1), z_body.view(X.shape[0], -1)
+                x_body.view(X.shape[0], -1),
+                z_body.view(X.shape[0], -1),
+                weight=alpha.squeeze(),
             )
             loss = loss + loss_clip
             logs["loss_clip"] += loss_clip.detach()
@@ -200,8 +204,8 @@ def train_model(
     num_epochs=1,
     device="cpu",
     patience=100,
-    loss_class=nn.CrossEntropyLoss(reduction="none"),
-    loss_gen=nn.L1Loss(),
+    loss_class=nn.CrossEntropyLoss(),
+    loss_gen=nn.MSELoss(),
     use_clip=True,
     output_dir="",
     save_tag="",

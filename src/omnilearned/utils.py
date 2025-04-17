@@ -69,6 +69,7 @@ class CLIPLoss(nn.Module):
         self,
         clean_features: torch.FloatTensor,
         perturbed_features: torch.FloatTensor,
+        weight=None,
         logit_scale: float = 2.74,
         output_dict: bool = False,
     ) -> torch.FloatTensor:
@@ -82,9 +83,13 @@ class CLIPLoss(nn.Module):
             logits_per_clean.shape[0], device=clean_features.device, dtype=torch.long
         )
         total_loss = (
-            F.cross_entropy(logits_per_clean, labels)
-            + F.cross_entropy(logits_per_perturbed, labels)
+            F.cross_entropy(logits_per_clean, labels, reduction="none")
+            + F.cross_entropy(logits_per_perturbed, labels, reduction="none")
         ) / 2
+        if weight is not None:
+            total_loss = torch.mean(weight * total_loss)
+        else:
+            total_loss = total_loss.mean()
         return {"contrastive_loss": total_loss} if output_dict else total_loss
 
 
