@@ -12,14 +12,15 @@ import os
 from tqdm import tqdm
 import numpy as np
 
+
 def eval_model(
     model,
     val_loader,
     device="cpu",
 ):
     prediction, mass, pt, labels = test_step(model, val_loader, device)
-    #print_metrics(prediction, labels)
-    np.savez("outputs_qcd.npz", prediction=prediction, mass=mass,pt=pt)
+    # print_metrics(prediction, labels)
+    np.savez("outputs_qcd.npz", prediction=prediction, mass=mass, pt=pt)
 
 
 def test_step(
@@ -94,8 +95,8 @@ def run(
     dataset: str = "top",
     path: str = "/pscratch/sd/v/vmikuni/datasets",
     num_feat: int = 4,
-    conditional: bool= False,
-    num_cond: int = 3,        
+    conditional: bool = False,
+    num_cond: int = 3,
     use_pid: bool = False,
     pid_idx: int = -1,
     use_add: bool = False,
@@ -133,8 +134,8 @@ def run(
         cond_dim=num_cond,
         pid=use_pid,
         add_info=use_add,
-        add_dim = num_add,
-        cut=radius,        
+        add_dim=num_add,
+        cut=radius,
         use_time=True,
         mode=mode,
         num_classes=num_classes,

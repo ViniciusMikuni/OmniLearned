@@ -21,31 +21,23 @@ def train(
         "", help="Tag given to pretrained checkpoint model"
     ),
     dataset: str = typer.Option("top", help="Dataset to load"),
-    path: str = typer.Option(
-        "/pscratch/sd/v/vmikuni/datasets", help="Dataset path"
-    ),
+    path: str = typer.Option("/pscratch/sd/v/vmikuni/datasets", help="Dataset path"),
     wandb: bool = typer.Option(False, help="use wandb logging"),
     fine_tune: bool = typer.Option(False, help="Fine tune the model"),
     resuming: bool = typer.Option(False, help="Resume training"),
     # Model Options
     num_feat: int = typer.Option(
-        4, help="Number of input kinematic features (not considering PID or additional features)"
+        4,
+        help="Number of input kinematic features (not considering PID or additional features)",
     ),
     conditional: bool = typer.Option(False, help="Use global conditional features"),
-    num_cond: int = typer.Option(
-        3, help="Number of global conditioning features"
-    ),
-
+    num_cond: int = typer.Option(3, help="Number of global conditioning features"),
     use_pid: bool = typer.Option(False, help="Use particle ID for training"),
-    pid_idx: int = typer.Option(
-        4, help="Index of the PID in the input array"
-    ),
+    pid_idx: int = typer.Option(4, help="Index of the PID in the input array"),
     use_add: bool = typer.Option(
         False, help="Use additional features beyond kinematic information"
     ),
-    num_add: int = typer.Option(
-        4, help="Number of additional features"
-    ),
+    num_add: int = typer.Option(4, help="Number of additional features"),
     use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
     num_classes: int = typer.Option(
         2, help="Number of classes in the classification task"
@@ -129,28 +121,20 @@ def evaluate(
     ),
     save_tag: str = typer.Option("", help="Extra tag for checkpoint model"),
     dataset: str = typer.Option("top", help="Dataset to load"),
-    path: str = typer.Option(
-        "/pscratch/sd/v/vmikuni/datasets", help="Dataset path"
-    ),
+    path: str = typer.Option("/pscratch/sd/v/vmikuni/datasets", help="Dataset path"),
     # Model Options
     num_feat: int = typer.Option(
-        4, help="Number of input kinematic features (not considering PID or additional features)"
+        4,
+        help="Number of input kinematic features (not considering PID or additional features)",
     ),
     conditional: bool = typer.Option(False, help="Use global conditional features"),
-    num_cond: int = typer.Option(
-        3, help="Number of global conditioning features"
-    ),
+    num_cond: int = typer.Option(3, help="Number of global conditioning features"),
     use_pid: bool = typer.Option(False, help="Use particle ID for training"),
-    pid_idx: int = typer.Option(
-        4, help="Index of the PID in the input array"
-    ),
+    pid_idx: int = typer.Option(4, help="Index of the PID in the input array"),
     use_add: bool = typer.Option(
         False, help="Use additional features beyond kinematic information"
     ),
-    num_add: int = typer.Option(
-        4, help="Number of additional features"
-    ),
-
+    num_add: int = typer.Option(4, help="Number of additional features"),
     use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
     num_classes: int = typer.Option(
         2, help="Number of classes in the classification task"

@@ -80,3 +80,6 @@ include = '\.pyi?$'
 [tool.isort]
 profile = "black"
 line_length = 88
+
+[tool.ruff]
+exclude = ["*.ipynb"]

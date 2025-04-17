@@ -472,8 +472,8 @@ def run(
         cond_dim=num_cond,
         pid=use_pid,
         add_info=use_add,
-        add_dim = num_add,
-        cut=radius,        
+        add_dim=num_add,
+        cut=radius,
         use_time=True,
         mode=mode,
         num_classes=num_classes,
@@ -616,7 +616,9 @@ def run(
         lr_scheduler,
         num_epochs=epoch,
         device=device,
-        loss_class=nn.CrossEntropyLoss(reduction="none",label_smoothing = 0.1 if mode == 'pretrain' else 0.0),
+        loss_class=nn.CrossEntropyLoss(
+            reduction="none", label_smoothing=0.1 if mode == "pretrain" else 0.0
+        ),
         output_dir=outdir,
         save_tag=save_tag,
         use_clip=use_clip,
