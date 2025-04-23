@@ -202,10 +202,16 @@ def load_data(
 
     if dataset_name == "pretrain":
         names = ["atlas", "aspen", "jetclass", "jetclass2", "h1"]
+        if dataset_type == "train":
+            types = ['train','val','test']
+        else:
+            types = [dataset_type]
     else:
         names = [dataset_name]
+        types = [dataset_type]
 
-    dataset_paths = [os.path.join(path, name, dataset_type) for name in names]
+        
+    dataset_paths = [os.path.join(path, name, type) for name in names for type in types]
 
     file_list = []
     file_indices = []
@@ -246,7 +252,7 @@ def load_data(
             np.save(index_file, np.array(file_indices, dtype=np.int32))
 
     # Shift labels if they are not used for pretrain
-    label_shift = {"jetclass": 2, "aspen": 12, "jetclass2": 13}
+    label_shift = {"jetclass": 2, "jetclass2": 12, "aspen": 200}
 
     data = HEPDataset(
         file_list,
