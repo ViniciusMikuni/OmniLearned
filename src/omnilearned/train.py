@@ -30,19 +30,21 @@ def train_step(
     device,
     clip_loss=CLIPLoss(),
     use_clip=False,
+    use_event_loss=False,
     iterations_per_epoch=-1,
     use_amp=False,
     gscaler=None,
 ):
     model.train()
 
-    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
+    logs_buff = torch.zeros((6), dtype=torch.float32, device=device)
     logs = {}
     logs["loss"] = logs_buff[0].view(-1)
     logs["loss_class"] = logs_buff[1].view(-1)
     logs["loss_gen"] = logs_buff[2].view(-1)
     logs["loss_perturb"] = logs_buff[3].view(-1)
     logs["loss_clip"] = logs_buff[4].view(-1)
+    logs["loss_class_event"] = logs_buff[5].view(-1)
 
     if iterations_per_epoch < 0:
         iterations_per_epoch = len(dataloader)
@@ -69,31 +71,43 @@ def train_step(
             "cuda:{}".format(device) if torch.cuda.is_available() else "cpu",
             enabled=use_amp,
         ):
-            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(
-                X, y, **model_kwargs
-            )
-
+            outputs = model(X, y, **model_kwargs)
             loss = 0
 
-            if y_pred is not None:
-                loss_class = class_cost(y_pred.squeeze(), y).mean()
-                loss = loss + loss_class
-                logs["loss_class"] += loss_class.detach()
-            if z_pred is not None:
-                loss_gen = gen_cost(v, z_pred)
+            if outputs['y_pred'] is not None:
+                if use_event_loss:
+                    event_mask = y >= 200
+                    if event_mask.any():
+                        loss_event = class_cost(
+                            outputs['y_pred'][event_mask][:,200:].squeeze(),
+                            y[event_mask]-200).mean()
+                        logs["loss_class_event"] += loss_event.detach()
+                        loss  = loss + loss_event
+                    loss_class = class_cost(
+                        outputs['y_pred'][~event_mask][:,:200].squeeze(),
+                        y[~event_mask]).mean()
+                    logs["loss_class"] += loss_class.detach()
+                    loss  = loss + loss_class
+                        
+                else:
+                    loss_class = class_cost(outputs['y_pred'].squeeze(), y).mean()
+                    loss = loss + loss_class
+                    logs["loss_class"] += loss_class.detach()
+            if outputs['z_pred'] is not None:
+                loss_gen = gen_cost(outputs['v'], outputs['z_pred'])
                 loss = loss + loss_gen
                 logs["loss_gen"] += loss_gen.detach()
-            if y_perturb is not None:
+            if outputs['y_perturb'] is not None:
                 loss_perturb = torch.mean(
-                    alpha.squeeze() * class_cost(y_perturb.squeeze(), y)
+                    outputs['alpha'].squeeze() * class_cost(outputs['y_perturb'].squeeze(), y)
                 )
                 loss = loss + loss_perturb
                 logs["loss_perturb"] += loss_perturb.detach()
-            if use_clip and z_body is not None and x_body is not None:
+            if use_clip and outputs['z_body'] is not None and outputs['x_body'] is not None:
                 loss_clip = clip_loss(
-                    x_body.view(X.shape[0], -1),
-                    z_body.view(X.shape[0], -1),
-                    weight=alpha,
+                    outputs['x_body'].view(X.shape[0], -1),
+                    outputs['z_body'].view(X.shape[0], -1),
+                    weight=outputs['alpha'],
                 )
                 loss = loss + loss_clip
                 logs["loss_clip"] += loss_clip.detach()
@@ -126,18 +140,20 @@ def test_step(
     device,
     clip_loss=CLIPLoss(),
     use_clip=False,
+    use_event_loss = False,
     iterations_per_epoch=-1,
 ):
     model.eval()
 
-    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
+    logs_buff = torch.zeros((6), dtype=torch.float32, device=device)
     logs = {}
     logs["loss"] = logs_buff[0].view(-1)
     logs["loss_class"] = logs_buff[1].view(-1)
     logs["loss_gen"] = logs_buff[2].view(-1)
     logs["loss_perturb"] = logs_buff[3].view(-1)
     logs["loss_clip"] = logs_buff[4].view(-1)
-
+    logs["loss_class_event"] = logs_buff[5].view(-1)
+    
     if iterations_per_epoch < 0:
         iterations_per_epoch = len(dataloader)
 
@@ -158,29 +174,43 @@ def test_step(
             if key in batch
         }
         with torch.no_grad():
-            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(
-                X, y, **model_kwargs
-            )
-
+            outputs = model(X, y, **model_kwargs)
+            
         loss = 0
-        if y_pred is not None:
-            loss_class = class_cost(y_pred.squeeze(), y).mean()
-            loss = loss + loss_class
-            logs["loss_class"] += loss_class.detach()
-        if z_pred is not None:
-            loss_gen = gen_cost(v, z_pred)
+        
+        if outputs['y_pred'] is not None:
+            if use_event_loss:
+                event_mask = y >= 200
+                if event_mask.any():
+                    loss_event = class_cost(
+                        outputs['y_pred'][event_mask][:,200:].squeeze(),
+                        y[event_mask]-200).mean()
+                    logs["loss_class_event"] += loss_event.detach()
+                    loss  = loss + loss_event
+                loss_class = class_cost(
+                    outputs['y_pred'][~event_mask][:,:200].squeeze(),
+                    y[~event_mask]).mean()
+                logs["loss_class"] += loss_class.detach()
+                loss  = loss + loss_class
+            else:
+                loss_class = class_cost(outputs['y_pred'].squeeze(), y).mean()
+                loss = loss + loss_class
+                logs["loss_class"] += loss_class.detach()
+        if outputs['z_pred'] is not None:
+            loss_gen = gen_cost(outputs['v'], outputs['z_pred'])
             loss = loss + loss_gen
             logs["loss_gen"] += loss_gen.detach()
-        if y_perturb is not None:
-            loss_perturb = (alpha.squeeze() * class_cost(y_perturb.squeeze(), y)).mean()
+        if outputs['y_perturb'] is not None:
+            loss_perturb = torch.mean(
+                outputs['alpha'].squeeze() * class_cost(outputs['y_perturb'].squeeze(), y)
+            )
             loss = loss + loss_perturb
             logs["loss_perturb"] += loss_perturb.detach()
-
-        if use_clip and z_body is not None and x_body is not None:
+        if use_clip and outputs['z_body'] is not None and outputs['x_body'] is not None:
             loss_clip = clip_loss(
-                x_body.view(X.shape[0], -1),
-                z_body.view(X.shape[0], -1),
-                weight=alpha.squeeze(),
+                outputs['x_body'].view(X.shape[0], -1),
+                outputs['z_body'].view(X.shape[0], -1),
+                weight=outputs['alpha'],
             )
             loss = loss + loss_clip
             logs["loss_clip"] += loss_clip.detach()
@@ -206,7 +236,8 @@ def train_model(
     patience=100,
     loss_class=nn.CrossEntropyLoss(),
     loss_gen=nn.MSELoss(),
-    use_clip=True,
+    use_clip=False,
+    use_event_loss=False,
     output_dir="",
     save_tag="",
     iterations_per_epoch=-1,
@@ -244,6 +275,7 @@ def train_model(
             epoch,
             device,
             use_clip=use_clip,
+            use_event_loss=use_event_loss,
             iterations_per_epoch=iterations_per_epoch,
             use_amp=use_amp,
             gscaler=gscaler,
@@ -256,6 +288,7 @@ def train_model(
             epoch,
             device,
             use_clip=use_clip,
+            use_event_loss=use_event_loss,
             iterations_per_epoch=iterations_per_epoch,
         )
 
@@ -268,6 +301,9 @@ def train_model(
             )
             print(
                 f"Class Loss: {train_logs['loss_class']:.4f}, Class Val Loss: {val_logs['loss_class']:.4f}"
+            )
+            print(
+                f"Class Event Loss: {train_logs['loss_class_event']:.4f}, Class Event Val Loss: {val_logs['loss_class_event']:.4f}"
             )
             print(
                 f"Gen Loss: {train_logs['loss_gen']:.4f}, Gen Val Loss: {val_logs['loss_gen']:.4f}"
@@ -436,6 +472,7 @@ def run(
     use_add: bool = False,
     num_add: int = 4,
     use_clip: bool = False,
+    use_event_loss: bool= False,
     num_classes: int = 2,
     mode: str = "classifier",
     batch: int = 64,
@@ -620,12 +657,11 @@ def run(
         lr_scheduler,
         num_epochs=epoch,
         device=device,
-        loss_class=nn.CrossEntropyLoss(
-            reduction="none", label_smoothing=0.1 if mode == "pretrain" else 0.0
-        ),
+        loss_class=nn.CrossEntropyLoss(reduction="none"),
         output_dir=outdir,
         save_tag=save_tag,
         use_clip=use_clip,
+        use_event_loss=use_event_loss,
         iterations_per_epoch=iterations,
         epoch_init=epoch_init,
         loss_init=loss_init,

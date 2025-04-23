@@ -143,7 +143,14 @@ class PET2(nn.Module):
             if self.mode == "pretrain":
                 y_perturb = self.classifier(z_body, mask)
 
-        return y_pred, y_perturb, z_pred, v, x_body, z_body, alpha**2
+        return {'y_pred':y_pred,
+                'y_perturb':y_perturb,
+                'z_pred':z_pred,
+                'v':v,
+                'x_body':x_body,
+                'z_body':z_body,
+                'alpha':alpha**2}
+
 
 
 class PET_classifier(nn.Module):

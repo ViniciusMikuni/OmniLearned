@@ -39,6 +39,7 @@ def train(
     ),
     num_add: int = typer.Option(4, help="Number of additional features"),
     use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
+    use_event_loss: bool = typer.Option(False, help="Use additional classification loss between physics process"),
     num_classes: int = typer.Option(
         2, help="Number of classes in the classification task"
     ),
@@ -88,6 +89,7 @@ def train(
         use_add,
         num_add,
         use_clip,
+        use_event_loss,
         num_classes,
         mode,
         batch,
@@ -135,7 +137,6 @@ def evaluate(
         False, help="Use additional features beyond kinematic information"
     ),
     num_add: int = typer.Option(4, help="Number of additional features"),
-    use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
     num_classes: int = typer.Option(
         2, help="Number of classes in the classification task"
     ),
@@ -169,7 +170,6 @@ def evaluate(
         pid_idx,
         use_add,
         num_add,
-        use_clip,
         num_classes,
         mode,
         batch,
