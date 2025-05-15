@@ -7,6 +7,7 @@ from omnilearned.dataloader import load_data
 app = typer.Typer(
     help="OmniLearned: A unified deep learning approach for particle physics",
     no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
 )
 
 
@@ -39,7 +40,9 @@ def train(
     ),
     num_add: int = typer.Option(4, help="Number of additional features"),
     use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
-    use_event_loss: bool = typer.Option(False, help="Use additional classification loss between physics process"),
+    use_event_loss: bool = typer.Option(
+        False, help="Use additional classification loss between physics process"
+    ),
     num_classes: int = typer.Option(
         2, help="Number of classes in the classification task"
     ),
@@ -49,7 +52,7 @@ def train(
     # Training options
     batch: int = typer.Option(64, help="Batch size"),
     iterations: int = typer.Option(-1, help="Number of iterations per pass"),
-    epoch: int = typer.Option(15, help="Number of epochs"),
+    epoch: int = typer.Option(10, help="Number of epochs"),
     use_amp: bool = typer.Option(False, help="Use amp"),
     # Optimizer
     b1: float = typer.Option(0.95, help="Lion b1"),
@@ -63,8 +66,7 @@ def train(
     num_transf: int = typer.Option(6, help="Number of transformer blocks"),
     num_tokens: int = typer.Option(4, help="Number of trainable tokens"),
     num_head: int = typer.Option(8, help="Number of transformer heads"),
-    K: int = typer.Option(15, help="Number of nearest neighbors"),
-    radius: float = typer.Option(0.4, help="Local neighborhood radius"),
+    K: int = typer.Option(10, help="Number of nearest neighbors"),
     base_dim: int = typer.Option(96, help="Base value for dimensions"),
     mlp_ratio: int = typer.Option(2, help="Multiplier for MLP layers"),
     attn_drop: float = typer.Option(0.0, help="Dropout for attention layers"),
@@ -105,7 +107,6 @@ def train(
         num_tokens,
         num_head,
         K,
-        radius,
         base_dim,
         mlp_ratio,
         attn_drop,
@@ -137,6 +138,9 @@ def evaluate(
         False, help="Use additional features beyond kinematic information"
     ),
     num_add: int = typer.Option(4, help="Number of additional features"),
+    use_event_loss: bool = typer.Option(
+        False, help="Use additional classification loss between physics process"
+    ),
     num_classes: int = typer.Option(
         2, help="Number of classes in the classification task"
     ),
@@ -149,8 +153,7 @@ def evaluate(
     num_transf: int = typer.Option(6, help="Number of transformer blocks"),
     num_tokens: int = typer.Option(4, help="Number of trainable tokens"),
     num_head: int = typer.Option(8, help="Number of transformer heads"),
-    K: int = typer.Option(15, help="Number of nearest neighbors"),
-    radius: float = typer.Option(0.4, help="Local neighborhood radius"),
+    K: int = typer.Option(10, help="Number of nearest neighbors"),
     base_dim: int = typer.Option(96, help="Base value for dimensions"),
     mlp_ratio: int = typer.Option(2, help="Multiplier for MLP layers"),
     attn_drop: float = typer.Option(0.0, help="Dropout for attention layers"),
@@ -170,6 +173,7 @@ def evaluate(
         pid_idx,
         use_add,
         num_add,
+        use_event_loss,
         num_classes,
         mode,
         batch,
@@ -177,7 +181,6 @@ def evaluate(
         num_tokens,
         num_head,
         K,
-        radius,
         base_dim,
         mlp_ratio,
         attn_drop,

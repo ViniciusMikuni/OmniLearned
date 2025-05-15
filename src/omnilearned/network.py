@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import einops
 
 from omnilearned.layers import (
     NoScaleDropout,
@@ -38,7 +37,6 @@ class PET2(nn.Module):
         pid_dim=9,
         add_info=False,
         add_dim=4,
-        cut=0.4,
         use_time=False,
         mode="classifier",
         num_classes=2,
@@ -68,10 +66,10 @@ class PET2(nn.Module):
             pid_dim=pid_dim,
             add_info=add_info,
             add_dim=add_dim,
-            cut=cut,
             use_time=use_time,
         )
 
+        self.num_add = self.body.num_add
         self.classifier = None
         self.generator = None
         if self.mode == "classifier" or self.mode == "pretrain":
@@ -85,7 +83,6 @@ class PET2(nn.Module):
                 mlp_drop=mlp_drop,
                 attn_drop=attn_drop,
                 num_tokens=num_tokens,
-                num_add=1 if conditional else 0,
                 num_classes=num_classes,
             )
 
@@ -101,7 +98,7 @@ class PET2(nn.Module):
                 mlp_drop=mlp_drop,
                 attn_drop=attn_drop,
                 num_tokens=num_tokens,
-                num_add=1 if conditional else 0,
+                num_add=self.num_add,
                 num_classes=num_classes,
             )
         self.initialize_weights()
@@ -117,11 +114,9 @@ class PET2(nn.Module):
     @torch.jit.ignore
     def no_weight_decay(self):
         # Specify parameters that should not be decayed
-        return {"norm", "scale"}
+        return {"norm", "scale", "token"}
 
     def forward(self, x, y, cond=None, pid=None, add_info=None):
-        mask = x[:, :, 3:4] != 0
-
         y_pred, y_perturb, z_pred, v, x_body, z_body = (
             None,
             None,
@@ -133,24 +128,25 @@ class PET2(nn.Module):
         time = torch.rand(size=(x.shape[0],)).to(x.device)
         _, alpha, sigma = get_logsnr_alpha_sigma(time)
         if self.mode == "generator" or self.mode == "pretrain":
-            z, v = perturb(x, mask, time)
+            z, v = perturb(x, time)
             z_body = self.body(z, cond, pid, add_info, time)
-            z_pred = self.generator(z_body, mask, y)
+            z_pred = self.generator(z_body, y)
 
         if self.mode == "classifier" or self.mode == "pretrain":
             x_body = self.body(x, cond, pid, add_info, torch.zeros_like(time))
-            y_pred = self.classifier(x_body, mask)
+            y_pred = self.classifier(x_body)
             if self.mode == "pretrain":
-                y_perturb = self.classifier(z_body, mask)
+                y_perturb = self.classifier(z_body)
 
-        return {'y_pred':y_pred,
-                'y_perturb':y_perturb,
-                'z_pred':z_pred,
-                'v':v,
-                'x_body':x_body,
-                'z_body':z_body,
-                'alpha':alpha**2}
-
+        return {
+            "y_pred": y_pred,
+            "y_perturb": y_perturb,
+            "z_pred": z_pred,
+            "v": v,
+            "x_body": x_body,
+            "z_body": z_body,
+            "alpha": alpha**2,
+        }
 
 
 class PET_classifier(nn.Module):
@@ -165,12 +161,10 @@ class PET_classifier(nn.Module):
         mlp_drop=0.1,
         attn_drop=0.1,
         num_tokens=4,
-        num_add=1,
         num_classes=2,
     ):
         super().__init__()
         self.num_tokens = num_tokens
-        self.num_add = num_add
 
         self.in_blocks = nn.ModuleList(
             [
@@ -182,25 +176,22 @@ class PET_classifier(nn.Module):
                     mlp_drop=mlp_drop,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                    num_tokens=self.num_tokens + self.num_add,
+                    num_tokens=self.num_tokens,
                     skip=False,
                 )
                 for _ in range(num_transformers)
             ]
         )
 
-        self.fc = nn.Sequential(
-            MLP(
-                hidden_size * (self.num_tokens + self.num_add),
-                int(mlp_ratio * num_tokens * hidden_size),
-                act_layer=act_layer,
-                drop=mlp_drop,
-                norm_layer=norm_layer,
-            ),
+        self.fc = MLP(
+            hidden_size * self.num_tokens,
+            int(mlp_ratio * self.num_tokens * hidden_size),
+            act_layer=act_layer,
+            drop=mlp_drop,
+            norm_layer=norm_layer,
         )
-        self.out = nn.Linear(
-            (self.num_tokens + self.num_add) * hidden_size, num_classes
-        )
+
+        self.out = nn.Linear(self.num_tokens * hidden_size, num_classes)
 
         self.initialize_weights()
 
@@ -212,18 +203,13 @@ class PET_classifier(nn.Module):
 
         self.apply(_init_weights)
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        # Specify parameters that should not be decayed
-        return {"norm"}
-
-    def forward(self, x, mask):
+    def forward(self, x):
         B = x.shape[0]
-
+        mask = x[:, self.num_tokens :, 3:4] != 0
         for ib, blk in enumerate(self.in_blocks):
             x = blk(x, mask=mask)
 
-        x = self.fc(x[:, : self.num_tokens + self.num_add].reshape(B, -1))
+        x = self.fc(x[:, : self.num_tokens].reshape(B, -1))
         return self.out(x)
 
 
@@ -268,7 +254,7 @@ class PET_generator(nn.Module):
                     mlp_drop=mlp_drop,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                    num_tokens=num_add,
+                    num_tokens=num_tokens,
                     skip=False,
                     use_int=False,
                 )
@@ -297,30 +283,20 @@ class PET_generator(nn.Module):
 
         self.apply(_init_weights)
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        # Specify parameters that should not be decayed
-        return {"norm"}
-
-    def forward(self, x, mask, y):
-        label_embed = self.pid_embed(y)
-
-        # remove the classification tokens
-        x = x[:, self.num_tokens :]
-        if self.num_add > 0:
-            mask = torch.cat([torch.ones_like(mask[:, : self.num_add]), mask], 1)
-            x = x.clone()
-            x_first = x[:, 0] + label_embed
-            x = torch.cat([x_first.unsqueeze(1), x[:, 1:]], dim=1)
-
-        else:
-            x = x + label_embed.unsqueeze(1) * mask
+    def forward(self, x, y):
+        # Add tokens and label embedding
+        mask = x[:, :, 3:4] != 0
+        mask = torch.cat([torch.ones_like(mask[:, :1]), mask], 1)
+        x = torch.cat([self.pid_embed(y).unsqueeze(1), x], 1) * mask
 
         for ib, blk in enumerate(self.in_blocks):
             x = blk(x, mask=mask)
 
-        x = self.fc(x[:, self.num_add :]) * mask[:, self.num_add :]
-        return self.out(x) * mask[:, self.num_add :]
+        x = (
+            self.fc(x[:, self.num_add + self.num_tokens + 1 :])
+            * mask[:, self.num_add + self.num_tokens + 1 :]
+        )
+        return self.out(x) * mask[:, self.num_add + self.num_tokens + 1 :]
 
 
 class PET_body(nn.Module):
@@ -345,7 +321,6 @@ class PET_body(nn.Module):
         pid_dim=9,
         add_info=False,
         add_dim=4,
-        cut=0.4,
         use_time=False,
     ):
         super().__init__()
@@ -355,6 +330,25 @@ class PET_body(nn.Module):
         self.conditional = conditional
         self.pid = pid
         self.add_info = add_info
+
+        self.embed = InputBlock(
+            in_features=input_dim,
+            hidden_features=int(mlp_ratio * hidden_size),
+            out_features=hidden_size,
+            norm_layer=norm_layer,
+            act_layer=act_layer,
+            use_cond=conditional,
+        )
+
+        if self.use_int:
+            self.interaction = InteractionBlock(
+                hidden_features=hidden_size,
+                out_features=num_heads,
+                # mlp_drop=mlp_drop,
+                act_layer=act_layer,
+                norm_layer=norm_layer,
+            )
+
         self.local_physics = LocalEmbeddingBlock(
             in_features=input_dim + 3 if conditional else input_dim,
             hidden_features=mlp_ratio * hidden_size,
@@ -378,12 +372,19 @@ class PET_body(nn.Module):
                 act_layer=act_layer,
             )
             self.num_add += 1
-        if self.pid:
-            # Will assume PIDs are just a list of integers and use the embedding layer, notice that zero_pid_idx is used to map zero-padded entries
-            self.pid_embed = nn.Sequential(
-                nn.Embedding(pid_dim, hidden_size, padding_idx=0),
-                NoScaleDropout(feature_drop),
+
+        if self.use_time:
+            # Time embedding module for diffusion timesteps
+            self.MPFourier = MPFourier(hidden_size)
+            self.time_embed = MLP(
+                in_features=hidden_size,
+                hidden_features=int(mlp_ratio * hidden_size),
+                out_features=hidden_size,
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                bias=False,
             )
+            self.num_add += 1
 
         if self.add_info:
             self.add_embed = nn.Sequential(
@@ -398,26 +399,17 @@ class PET_body(nn.Module):
                 NoScaleDropout(feature_drop),
             )
 
-        self.embed = InputBlock(
-            in_features=input_dim,
-            hidden_features=int(mlp_ratio * hidden_size),
-            out_features=hidden_size,
-            norm_layer=norm_layer,
-            act_layer=act_layer,
-            use_cond=conditional,
-        )
-        if self.use_int:
-            self.interaction = InteractionBlock(
-                hidden_features=hidden_size,
-                out_features=num_heads,
-                # mlp_drop=mlp_drop,
-                act_layer=act_layer,
-                norm_layer=norm_layer,
-                cut=cut,
+        if self.pid:
+            # Will assume PIDs are just a list of integers and use the embedding layer, notice that zero_pid_idx is used to map zero-padded entries
+            self.pid_embed = nn.Sequential(
+                nn.Embedding(pid_dim, hidden_size, padding_idx=0),
+                NoScaleDropout(feature_drop),
             )
-        self.num_tokens = num_tokens
-        self.token = nn.Parameter(torch.zeros(1, self.num_tokens, hidden_size))
 
+        self.num_tokens = num_tokens
+        self.token = nn.Parameter(1e-3 * torch.ones(1, self.num_tokens, hidden_size))
+
+        self.num_heads = num_heads
         self.in_blocks = nn.ModuleList(
             [
                 AttBlock(
@@ -437,23 +429,7 @@ class PET_body(nn.Module):
             ]
         )
 
-        # self.in_scales = nn.ModuleList(
-        #     [LayerScale(hidden_size) for _ in range(num_transformers)]
-        # )
-
         self.norm = norm_layer(hidden_size)
-
-        if self.use_time:
-            # Time embedding module for diffusion timesteps
-            self.MPFourier = MPFourier(hidden_size)
-            self.time_embed = MLP(
-                in_features=hidden_size,
-                hidden_features=int(mlp_ratio * hidden_size),
-                out_features=hidden_size,
-                norm_layer=norm_layer,
-                act_layer=act_layer,
-                bias=False,
-            )
 
         self.initialize_weights()
 
@@ -467,11 +443,6 @@ class PET_body(nn.Module):
 
         self.apply(_init_weights)
 
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        # Specify parameters that should not be decayed
-        return {"token", "norm"}
-
     def forward(self, x, cond=None, pid=None, add_info=None, time=None):
         B = x.shape[0]
         mask = x[:, :, 3:4] != 0
@@ -484,15 +455,12 @@ class PET_body(nn.Module):
         local_features, indices = self.local_physics(coord_shift + x[:, :, :2], x, mask)
 
         if self.use_int:
-            x_int, x_glob = self.interaction(x, mask)
-            x_int = einops.rearrange(x_int, "b n1 n2 h -> (b h) n1 n2")
-        else:
-            x_int = None
-            x_glob = 0.0
+            x_int = self.interaction(x, mask)
 
         # Combine local + global info
-        x = x_embed + local_features + x_glob
+        x = x_embed + local_features
         # Add classification tokens
+
         if pid is not None and self.pid:
             # Encode the PID info
             x = x + self.pid_embed(pid) * mask
@@ -502,25 +470,35 @@ class PET_body(nn.Module):
         if cond is not None and self.conditional:
             # Conditional information: jet level quantities for example
             x = torch.cat([self.cond_embed(cond).unsqueeze(1), x], 1)
-            mask = torch.cat([torch.ones_like(mask[:, : self.num_add]), mask], 1)
 
         if self.use_time and time is not None:
             # Create time token
-            time_token = self.time_embed(self.MPFourier(time))
-            # Add in the condition token
-            if self.conditional:
-                x = x.clone()
-                x_first = x[:, 0] + time_token
-                x = torch.cat([x_first.unsqueeze(1), x[:, 1:]], dim=1)
-            else:
-                x = x + time_token.unsqueeze(1) * mask
+            x = torch.cat([self.time_embed(self.MPFourier(time)).unsqueeze(1), x], 1)
 
         x = torch.cat([token, x], 1)
-        mask = torch.cat([torch.ones_like(mask[:, : self.num_tokens]), mask], 1)
+
+        # Create a new mask based on the updated point cloud with additional tokens
+        mask = x[:, :, 3:4] != 0
+
+        attn_mask = mask.float() @ mask.float().transpose(-1, -2)
+        attn_mask = ~(attn_mask.bool()).repeat_interleave(self.num_heads, dim=0)
+        attn_mask = attn_mask.float() * -1e9
+
+        if self.use_int:
+            # Add the information of the interaction matrix
+            attn_mask[
+                :, self.num_tokens + self.num_add :, self.num_tokens + self.num_add :
+            ] = (
+                x_int
+                + attn_mask[
+                    :,
+                    self.num_tokens + self.num_add :,
+                    self.num_tokens + self.num_add :,
+                ]
+            )
 
         for ib, blk in enumerate(self.in_blocks):
-            x = blk(x, mask=mask, x_int=x_int)
-            # x = x + self.in_scales[ib](blk(x, mask=mask, x_int=x_int))
+            x = blk(x, mask=mask, attn_mask=attn_mask)
 
         x = self.norm(x) * mask
         return x
