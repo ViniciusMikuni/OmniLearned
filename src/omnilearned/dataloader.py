@@ -10,7 +10,7 @@ import numpy as np
 from pathlib import Path
 
 
-def collate_point_cloud(batch):
+def collate_point_cloud(batch, max_part=150):
     """
     Collate function for point clouds and labels with truncation performed per batch.
 
@@ -37,7 +37,7 @@ def collate_point_cloud(batch):
 
     # Use validity mask based on feature index 2
     valid_mask = point_clouds[:, :, 2] != 0
-    max_particles = valid_mask.sum(dim=1).max().item()
+    max_particles = min(valid_mask.sum(dim=1).max().item(), max_part)
 
     # Truncate point clouds
     truncated_X = point_clouds[:, :max_particles, :]  # (B, M, F)
@@ -193,7 +193,8 @@ def load_data(
         "jetclass2",
         "h1",
         "toy",
-        "qcd",
+        "cms_qcd",
+        "cms_bsm",
     ]
     if dataset_name not in supported_datasets:
         raise ValueError(
@@ -201,16 +202,12 @@ def load_data(
         )
 
     if dataset_name == "pretrain":
-        names = ["atlas", "aspen", "jetclass", "jetclass2", "h1"]
-        if dataset_type == "train":
-            types = ['train','val','test']
-        else:
-            types = [dataset_type]
+        names = ["atlas", "aspen", "jetclass", "jetclass2", "h1", "cms_qcd", "cms_bsm"]
+        types = [dataset_type]
     else:
         names = [dataset_name]
         types = [dataset_type]
 
-        
     dataset_paths = [os.path.join(path, name, type) for name in names for type in types]
 
     file_list = []
@@ -250,9 +247,16 @@ def load_data(
                 except Exception as e:
                     print(f"ERROR: File {path} is likely corrupted: {e}")
             np.save(index_file, np.array(file_indices, dtype=np.int32))
+            print(f"Number of events: {len(file_indices)}")
 
     # Shift labels if they are not used for pretrain
-    label_shift = {"jetclass": 2, "jetclass2": 12, "aspen": 200}
+    label_shift = {
+        "jetclass": 2,
+        "jetclass2": 12,
+        "aspen": 200,
+        "cms_qcd": 201,
+        "cms_bsm": 202,
+    }
 
     data = HEPDataset(
         file_list,
@@ -268,13 +272,8 @@ def load_data(
         data,
         batch_size=batch,
         pin_memory=torch.cuda.is_available(),
-        shuffle=dataset_type == "train",
+        shuffle=True,
         sampler=None,
-        # sampler=(
-        #     DistributedSampler(data, shuffle=dataset_type == "train")
-        #     if distributed
-        #     else None
-        # ),
         num_workers=num_workers,
         drop_last=True,
         collate_fn=collate_point_cloud,
