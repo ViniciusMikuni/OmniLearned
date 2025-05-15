@@ -103,7 +103,7 @@ def sum_reduce(num, device):
     return rt
 
 
-def get_param_groups(model, wd, lr, lr_factor=0.1, fine_tune=False):
+def get_param_groups(model, wd, lr, lr_factor=1.0, fine_tune=False):
     no_decay, decay = [], []
     last_layer_no_decay, last_layer_decay = [], []
 
@@ -131,7 +131,7 @@ def get_param_groups(model, wd, lr, lr_factor=0.1, fine_tune=False):
     ]
 
     # Adjust learning rate for last layer if fine-tuning
-    last_layer_lr = lr / lr_factor if fine_tune else lr
+    last_layer_lr = lr * lr_factor if fine_tune else lr
 
     if last_layer_decay:
         param_groups.append(
