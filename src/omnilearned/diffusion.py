@@ -32,7 +32,8 @@ def get_logsnr_alpha_sigma(time, shift=1.0):
     return logsnr, alpha, sigma
 
 
-def perturb(x, mask, time):
+def perturb(x, time):
+    mask = x[:, :, 3:4] != 0
     eps = torch.randn_like(x)  # eps ~ N(0, 1)
     logsnr, alpha, sigma = get_logsnr_alpha_sigma(time)
     z = alpha * x + eps * sigma
