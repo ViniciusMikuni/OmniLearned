@@ -195,7 +195,7 @@ class LocalEmbeddingBlock(nn.Module):
         K=10,
         num_heads=4,
         physics=False,
-        num_transformers=1,
+        num_transformers=2,
     ):
         super().__init__()
         self.K = K

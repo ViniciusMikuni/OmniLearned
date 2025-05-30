@@ -7,9 +7,9 @@ from omnilearned.utils import (
     is_master_node,
     ddp_setup,
     get_checkpoint_name,
+    print_metrics,
 )
 import os
-import numpy as np
 import time
 
 
@@ -24,13 +24,14 @@ def gather_tensors(x):
         buf = [torch.zeros_like(x) for _ in range(ws)]
         dist.all_gather(buf, x)
         x = torch.cat(buf, dim=0)
-    return x.cpu().numpy()
+    return x.cpu()
 
 
 def eval_model(
     model,
     val_loader,
     dataset,
+    use_event_loss,
     device="cpu",
 ):
     start = time.time()
@@ -41,10 +42,21 @@ def eval_model(
             gather_tensors(t) for t in (prediction, mass, pt, labels)
         ]
 
-    # print_metrics(prediction, labels)
+    if is_master_node():
+        print_metrics(prediction.softmax(-1).numpy(), labels.numpy())
     if is_master_node():
         print("Time taken for evaluation is {} sec".format(time.time() - start))
-        np.savez(f"outputs_{dataset}.npz", prediction=prediction, mass=mass, pt=pt)
+    #     if use_event_loss:
+    #         np.savez(f"/pscratch/sd/v/vmikuni/outputs_{dataset}.npz",
+    #                  # prediction= torch.nn.functional.log_softmax(prediction[:,:200],dim=-1).numpy(),
+    #                  # event_prediction = torch.nn.functional.log_softmax(prediction[:,200:],dim=-1).numpy(),
+    #                  prediction= prediction[:,:200].softmax(-1).numpy(),
+    #                  event_prediction = prediction[:,200:].softmax(-1).numpy(),
+    #                  mass=mass.numpy(), pt=pt.numpy())
+    #     else:
+    #         np.savez(f"/pscratch/sd/v/vmikuni/outputs_{dataset}.npz",
+    #                  prediction= torch.nn.functional.log_softmax(prediction,dim=-1).numpy(),
+    #                  mass=mass.numpy(), pt=pt.numpy())
 
 
 def test_step(
@@ -59,8 +71,9 @@ def test_step(
     masses = []
     pts = []
 
-    for batch in dataloader:
-        # for batch_idx, batch in enumerate(dataloader):
+    for ib, batch in enumerate(dataloader):
+        if ib > 30000:
+            break
         X, y = batch["X"].to(device, dtype=torch.float), batch["y"].to(device)
         model_kwargs = {
             key: (batch[key].to(device) if batch[key] is not None else None)
@@ -68,11 +81,9 @@ def test_step(
             if key in batch
         }
         with torch.no_grad():
-            y_pred, y_perturb, z_pred, v, x_body, z_body, alpha = model(
-                X, y, **model_kwargs
-            )
+            outputs = model(X, y, **model_kwargs)
 
-        preds.append(y_pred.softmax(-1))
+        preds.append(outputs["y_pred"])
         labels.append(y)
         masses.append(torch.exp(batch["cond"][:, 1]))
         pts.append(torch.exp(batch["cond"][:, 0]))
@@ -100,7 +111,7 @@ def restore_checkpoint(
 
     base_model = model.module if hasattr(model, "module") else model
     base_model.to(device)
-    base_model.body.load_state_dict(checkpoint["body"])
+    base_model.body.load_state_dict(checkpoint["body"], strict=False)
 
     if base_model.classifier is not None and "classifier_head" in checkpoint:
         base_model.classifier.load_state_dict(checkpoint["classifier_head"])
@@ -121,15 +132,15 @@ def run(
     pid_idx: int = -1,
     use_add: bool = False,
     num_add: int = 4,
-    use_clip: bool = False,
+    use_event_loss: bool = False,
     num_classes: int = 2,
     mode: str = "classifier",
     batch: int = 64,
     num_transf: int = 6,
+    num_transf_head: int = 2,
     num_tokens: int = 4,
     num_head: int = 8,
     K: int = 15,
-    radius: float = 0.4,
     base_dim: int = 64,
     mlp_ratio: int = 2,
     attn_drop: float = 0.1,
@@ -143,6 +154,7 @@ def run(
         input_dim=num_feat,
         hidden_size=base_dim,
         num_transformers=num_transf,
+        num_transformers_head=num_transf_head,
         num_heads=num_head,
         mlp_ratio=mlp_ratio,
         mlp_drop=mlp_drop,
@@ -155,8 +167,7 @@ def run(
         pid=use_pid,
         add_info=use_add,
         add_dim=num_add,
-        cut=radius,
-        use_time=True,
+        use_time=False,
         mode=mode,
         num_classes=num_classes,
     )
@@ -174,7 +185,7 @@ def run(
     # load in train data
     val_loader = load_data(
         dataset,
-        dataset_type="val",
+        dataset_type="test",
         use_pid=use_pid,
         pid_idx=pid_idx,
         use_add=use_add,
@@ -222,5 +233,5 @@ def run(
         **kwarg,
     )
 
-    eval_model(model, val_loader, dataset, device=device)
+    eval_model(model, val_loader, dataset, use_event_loss=use_event_loss, device=device)
     dist.destroy_process_group()

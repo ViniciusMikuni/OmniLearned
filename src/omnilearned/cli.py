@@ -53,8 +53,10 @@ def train(
     batch: int = typer.Option(64, help="Batch size"),
     iterations: int = typer.Option(-1, help="Number of iterations per pass"),
     epoch: int = typer.Option(10, help="Number of epochs"),
+    warmup_epoch: int = typer.Option(1, help="Number of learning rate warmup epochs"),
     use_amp: bool = typer.Option(False, help="Use amp"),
     # Optimizer
+    optim: str = typer.Option("lion", help="optimizer to use"),
     b1: float = typer.Option(0.95, help="Lion b1"),
     b2: float = typer.Option(0.98, help="Lion b2"),
     lr: float = typer.Option(5e-5, help="Learning rate"),
@@ -64,6 +66,9 @@ def train(
     wd: float = typer.Option(0.0, help="Weight decay"),
     # Model
     num_transf: int = typer.Option(6, help="Number of transformer blocks"),
+    num_transf_heads: int = typer.Option(
+        2, help="Number of transformer blocks for heads and local embedding"
+    ),
     num_tokens: int = typer.Option(4, help="Number of trainable tokens"),
     num_head: int = typer.Option(8, help="Number of transformer heads"),
     K: int = typer.Option(10, help="Number of nearest neighbors"),
@@ -97,13 +102,16 @@ def train(
         batch,
         iterations,
         epoch,
+        warmup_epoch,
         use_amp,
+        optim,
         b1,
         b2,
         lr,
         lr_factor,
         wd,
         num_transf,
+        num_transf_heads,
         num_tokens,
         num_head,
         K,
@@ -151,6 +159,9 @@ def evaluate(
     batch: int = typer.Option(64, help="Batch size"),
     # Model
     num_transf: int = typer.Option(6, help="Number of transformer blocks"),
+    num_transf_heads: int = typer.Option(
+        2, help="Number of transformer blocks for heads and local embedding"
+    ),
     num_tokens: int = typer.Option(4, help="Number of trainable tokens"),
     num_head: int = typer.Option(8, help="Number of transformer heads"),
     K: int = typer.Option(10, help="Number of nearest neighbors"),
@@ -178,6 +189,7 @@ def evaluate(
         mode,
         batch,
         num_transf,
+        num_transf_heads,
         num_tokens,
         num_head,
         K,

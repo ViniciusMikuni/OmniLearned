@@ -50,6 +50,7 @@ class PET2(nn.Module):
             input_dim,
             hidden_size,
             num_transformers=num_transformers,
+            num_transf_local=num_transformers_head,
             num_heads=num_heads,
             mlp_ratio=mlp_ratio,
             norm_layer=norm_layer,
@@ -106,12 +107,12 @@ class PET2(nn.Module):
     def initialize_weights(self):
         def _init_weights(m):
             if isinstance(m, nn.Linear):
+                torch.nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
         self.apply(_init_weights)
 
-    @torch.jit.ignore
     def no_weight_decay(self):
         # Specify parameters that should not be decayed
         return {"norm", "scale", "token"}
@@ -305,6 +306,7 @@ class PET_body(nn.Module):
         input_dim,
         hidden_size,
         num_transformers=2,
+        num_transf_local=2,
         num_heads=4,
         mlp_ratio=2,
         norm_layer=DynamicTanh,
@@ -360,6 +362,7 @@ class PET_body(nn.Module):
             K=K,
             num_heads=num_heads,
             physics=True,
+            num_transformers=num_transf_local,
         )
 
         self.num_add = 0

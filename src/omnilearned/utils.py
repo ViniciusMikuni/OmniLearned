@@ -14,7 +14,7 @@ def print_metrics(y_preds_np, y_np, thresholds=[0.3, 0.5], background_class=0):
     # Compute multiclass AUC
     auc_ovo = metrics.roc_auc_score(
         y_np,
-        y_preds_np if y_preds_np.shape[-1] > 2 else np.argmax(y_preds_np, -1),
+        y_preds_np if y_preds_np.shape[-1] > 2 else y_preds_np[:, -1],
         multi_class="ovo",
     )
     print(f"AUC: {auc_ovo:.4f}\n")
@@ -111,7 +111,7 @@ def get_param_groups(model, wd, lr, lr_factor=1.0, fine_tune=False):
         if not param.requires_grad:
             continue
 
-        is_last_layer = name.startswith("classifier.out")  # Targets model.out layer
+        is_last_layer = name.startswith("classifier.out")
 
         if any(keyword in name for keyword in model.no_weight_decay()):
             if is_last_layer:

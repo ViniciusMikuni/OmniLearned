@@ -7,6 +7,8 @@ from omnilearned.dataloader import load_data
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from pytorch_optimizer import Lion
+from diffusers.optimization import get_cosine_schedule_with_warmup
+
 from omnilearned.utils import (
     is_master_node,
     ddp_setup,
@@ -391,17 +393,17 @@ def train_model(
             tracker["bestValLoss"] = losses["val_loss"][-1]
             tracker["bestEpoch"] = epoch
 
-            if is_master_node():
-                print("replacing best checkpoint ...")
-                save_checkpoint(
-                    model,
-                    epoch + 1,
-                    optimizer,
-                    losses["val_loss"][-1],
-                    lr_scheduler,
-                    output_dir,
-                    checkpoint_name,
-                )
+        if is_master_node():
+            print("replacing best checkpoint ...")
+            save_checkpoint(
+                model,
+                epoch + 1,
+                optimizer,
+                losses["val_loss"][-1],
+                lr_scheduler,
+                output_dir,
+                checkpoint_name,
+            )
 
         if run is not None:
             for key in train_logs:
@@ -482,9 +484,6 @@ def restore_checkpoint(
         startEpoch = checkpoint["epoch"] + 1
         best_loss = checkpoint["loss"]
     else:
-        # for param in base_model.body.parameters():
-        #     param.requires_grad = False
-
         if base_model.classifier is not None and "classifier_head" in checkpoint:
             classifier_state = checkpoint["classifier_head"]
             model_state = base_model.classifier.state_dict()
@@ -550,13 +549,16 @@ def run(
     batch: int = 64,
     iterations: int = -1,
     epoch: int = 15,
+    warmup_epoch: int = 1,
     use_amp: bool = False,
+    optim: str = "lion",
     b1: float = 0.95,
     b2: float = 0.98,
     lr: float = 5e-4,
     lr_factor: float = 10.0,
     wd: float = 0.3,
     num_transf: int = 6,
+    num_transf_heads: int = 2,
     num_tokens: int = 4,
     num_head: int = 8,
     K: int = 15,
@@ -573,6 +575,7 @@ def run(
         input_dim=num_feat,
         hidden_size=base_dim,
         num_transformers=num_transf,
+        num_transformers_head=num_transf_heads,
         num_heads=num_head,
         mlp_ratio=mlp_ratio,
         mlp_drop=mlp_drop,
@@ -636,11 +639,27 @@ def run(
     param_groups = get_param_groups(
         model, wd, lr, lr_factor=lr_factor, fine_tune=fine_tune
     )
-    optimizer = Lion(param_groups, betas=(b1, b2))
-    # optimizer =  torch.optim.AdamW(param_groups)
+
+    if optim not in ["adam", "lion"]:
+        raise ValueError(
+            f"Optimizer '{optim}' not supported. Choose from adam or lion."
+        )
+
+    if optim == "lion":
+        optimizer = Lion(param_groups, betas=(b1, b2))
+    if optim == "adam":
+        optimizer = torch.optim.AdamW(param_groups)
+
     train_steps = len(train_loader) if iterations < 0 else iterations
-    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, (train_steps * epoch)
+
+    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, (train_steps * epoch)
+    # )
+
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=train_steps * warmup_epoch,
+        num_training_steps=(train_steps * epoch),
     )
 
     epoch_init = 0

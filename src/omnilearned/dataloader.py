@@ -195,6 +195,7 @@ def load_data(
         "toy",
         "cms_qcd",
         "cms_bsm",
+        "cms_top",
     ]
     if dataset_name not in supported_datasets:
         raise ValueError(
