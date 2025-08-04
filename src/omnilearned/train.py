@@ -15,6 +15,7 @@ from omnilearned.utils import (
     get_param_groups,
     CLIPLoss,
     get_checkpoint_name,
+    shadow_copy,
 )
 import time
 import os
@@ -22,6 +23,73 @@ import torch.amp as amp
 
 torch.set_float32_matmul_precision("high")
 torch._dynamo.config.verbose = False
+
+
+def get_class_loss(weight, pred, y, class_cost, use_event_loss=False, logs={}):
+    loss = 0.0
+    if use_event_loss:
+        event_mask = y >= 200
+        if event_mask.any():
+            loss_event = torch.mean(
+                weight[event_mask]
+                * class_cost(pred[event_mask][:, 200:], y[event_mask] - 200)
+            )
+            logs["loss_class_event"] += loss_event.detach()
+            loss = loss + loss_event
+        if (~event_mask).any():
+            loss_class = torch.mean(
+                weight[~event_mask]
+                * class_cost(pred[~event_mask][:, :200], y[~event_mask])
+            )
+            logs["loss_class"] += loss_class.detach()
+            loss = loss + loss_class
+    else:
+        loss_class = torch.mean(weight * class_cost(pred, y))
+        loss = loss + loss_class
+        logs["loss_class"] += loss_class.detach()
+
+    return loss
+
+
+def get_loss(
+    outputs, y, class_cost, gen_cost, use_event_loss, use_clip, clip_loss, logs
+):
+    loss = 0.0
+    if outputs["y_pred"] is not None:
+        counts = torch.bincount(y, minlength=outputs["y_pred"].shape[-1]).float()
+        class_weights = 1.0 / (counts + 1e-6)
+        weights = class_weights[y]
+        weights = weights / weights.mean()
+        loss = loss + get_class_loss(
+            weights, outputs["y_pred"], y, class_cost, use_event_loss, logs
+        )
+
+    if outputs["z_pred"] is not None:
+        nonzero = (outputs["v"][:, :, 0] != 0).sum(1)
+        loss_gen = gen_cost(outputs["v"], outputs["z_pred"]).sum((1, 2)) / nonzero
+        loss_gen = loss_gen.mean()
+        loss = loss + loss_gen
+        logs["loss_gen"] += loss_gen.detach()
+    if outputs["y_perturb"] is not None:
+        counts = torch.bincount(y, minlength=outputs["y_pred"].shape[-1]).float()
+        class_weights = 1.0 / (counts + 1e-6)
+        weights = class_weights[y]
+        weights = outputs["alpha"].squeeze() * weights / weights.mean()
+        loss = loss + get_class_loss(
+            weights, outputs["y_perturb"], y, class_cost, use_event_loss, logs
+        )
+
+    if use_clip and outputs["z_body"] is not None and outputs["x_body"] is not None:
+        loss_clip = clip_loss(
+            outputs["x_body"].view(outputs["x_body"].shape[0], -1),
+            outputs["z_body"].view(outputs["x_body"].shape[0], -1),
+            weight=outputs["alpha"],
+        )
+        loss = loss + loss_clip
+        logs["loss_clip"] += loss_clip.detach()
+
+    logs["loss"] += loss.detach()
+    return loss
 
 
 def train_step(
@@ -39,18 +107,18 @@ def train_step(
     iterations_per_epoch=-1,
     use_amp=False,
     gscaler=None,
+    ema_model=None,
+    ema_decay=0.999,
 ):
     model.train()
 
-    logs_buff = torch.zeros((7), dtype=torch.float32, device=device)
+    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
     logs = {}
     logs["loss"] = logs_buff[0].view(-1)
     logs["loss_class"] = logs_buff[1].view(-1)
     logs["loss_gen"] = logs_buff[2].view(-1)
-    logs["loss_perturb"] = logs_buff[3].view(-1)
-    logs["loss_clip"] = logs_buff[4].view(-1)
-    logs["loss_class_event"] = logs_buff[5].view(-1)
-    logs["loss_event_perturb"] = logs_buff[6].view(-1)
+    logs["loss_clip"] = logs_buff[3].view(-1)
+    logs["loss_class_event"] = logs_buff[4].view(-1)
 
     if iterations_per_epoch < 0:
         iterations_per_epoch = len(dataloader)
@@ -78,82 +146,17 @@ def train_step(
             enabled=use_amp,
         ):
             outputs = model(X, y, **model_kwargs)
-            loss = 0
+            loss = get_loss(
+                outputs,
+                y,
+                class_cost,
+                gen_cost,
+                use_event_loss,
+                use_clip,
+                clip_loss,
+                logs,
+            )
 
-            if outputs["y_pred"] is not None:
-                if use_event_loss:
-                    event_mask = y >= 200
-                    if event_mask.any():
-                        loss_event = class_cost(
-                            outputs["y_pred"][event_mask][:, 200:], y[event_mask] - 200
-                        ).mean()
-                        logs["loss_class_event"] += loss_event.detach()
-                        loss = loss + loss_event
-                    if (~event_mask).any():
-                        loss_class = class_cost(
-                            outputs["y_pred"][~event_mask][:, :200], y[~event_mask]
-                        ).mean()
-                        logs["loss_class"] += loss_class.detach()
-                        loss = loss + loss_class
-                else:
-                    loss_class = class_cost(outputs["y_pred"], y).mean()
-                    loss = loss + loss_class
-                    logs["loss_class"] += loss_class.detach()
-            if outputs["z_pred"] is not None:
-                nonzero = (outputs["v"][:, :, 0] != 0).sum(1)
-                loss_gen = (
-                    gen_cost(outputs["v"], outputs["z_pred"]).sum((1, 2)) / nonzero
-                )
-                loss_gen = loss_gen.mean()
-                loss = loss + loss_gen
-                logs["loss_gen"] += loss_gen.detach()
-            if outputs["y_perturb"] is not None:
-                if use_event_loss:
-                    event_mask = y >= 200
-                    if event_mask.any():
-                        loss_event = torch.mean(
-                            outputs["alpha"][event_mask].squeeze(1)
-                            * class_cost(
-                                outputs["y_perturb"][event_mask][:, 200:],
-                                y[event_mask] - 200,
-                            )
-                        )
-                        logs["loss_event_perturb"] += loss_event.detach()
-                        loss = loss + loss_event
-
-                    if (~event_mask).any():
-                        loss_class = torch.mean(
-                            outputs["alpha"][~event_mask].squeeze(1)
-                            * class_cost(
-                                outputs["y_perturb"][~event_mask][:, :200],
-                                y[~event_mask],
-                            )
-                        )
-                        logs["loss_perturb"] += loss_class.detach()
-                        loss = loss + loss_class
-
-                else:
-                    loss_perturb = torch.mean(
-                        outputs["alpha"].squeeze(1)
-                        * class_cost(outputs["y_perturb"], y)
-                    )
-                    loss = loss + loss_perturb
-                    logs["loss_perturb"] += loss_perturb.detach()
-
-            if (
-                use_clip
-                and outputs["z_body"] is not None
-                and outputs["x_body"] is not None
-            ):
-                loss_clip = clip_loss(
-                    outputs["x_body"].view(X.shape[0], -1),
-                    outputs["z_body"].view(X.shape[0], -1),
-                    weight=outputs["alpha"],
-                )
-                loss = loss + loss_clip
-                logs["loss_clip"] += loss_clip.detach()
-
-        logs["loss"] += loss.detach()
         if use_amp and gscaler is not None:
             gscaler.scale(loss).backward()
             gscaler.unscale_(optimizer)
@@ -166,6 +169,13 @@ def train_step(
             optimizer.step()  # Update parameters
         scheduler.step()
 
+        if ema_model is not None:
+            with torch.no_grad():
+                for ema_p, model_p in zip(
+                    ema_model.parameters(), model.module.parameters()
+                ):
+                    ema_p.mul_(ema_decay).add_(model_p, alpha=1.0 - ema_decay)
+
     if dist.is_initialized():
         for key in logs:
             dist.all_reduce(logs[key].detach())
@@ -174,7 +184,7 @@ def train_step(
     return logs
 
 
-def test_step(
+def val_step(
     model,
     dataloader,
     class_cost,
@@ -188,15 +198,13 @@ def test_step(
 ):
     model.eval()
 
-    logs_buff = torch.zeros((7), dtype=torch.float32, device=device)
+    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
     logs = {}
     logs["loss"] = logs_buff[0].view(-1)
     logs["loss_class"] = logs_buff[1].view(-1)
     logs["loss_gen"] = logs_buff[2].view(-1)
-    logs["loss_perturb"] = logs_buff[3].view(-1)
-    logs["loss_clip"] = logs_buff[4].view(-1)
-    logs["loss_class_event"] = logs_buff[5].view(-1)
-    logs["loss_event_perturb"] = logs_buff[6].view(-1)
+    logs["loss_clip"] = logs_buff[3].view(-1)
+    logs["loss_class_event"] = logs_buff[4].view(-1)
 
     if iterations_per_epoch < 0:
         iterations_per_epoch = len(dataloader)
@@ -219,74 +227,16 @@ def test_step(
         }
         with torch.no_grad():
             outputs = model(X, y, **model_kwargs)
-
-        loss = 0
-
-        if outputs["y_pred"] is not None:
-            if use_event_loss:
-                event_mask = y >= 200
-                if event_mask.any():
-                    loss_event = class_cost(
-                        outputs["y_pred"][event_mask][:, 200:], y[event_mask] - 200
-                    ).mean()
-                    logs["loss_class_event"] += loss_event.detach()
-                    loss = loss + loss_event
-                if (~event_mask).any():
-                    loss_class = class_cost(
-                        outputs["y_pred"][~event_mask][:, :200], y[~event_mask]
-                    ).mean()
-                    logs["loss_class"] += loss_class.detach()
-                    loss = loss + loss_class
-            else:
-                loss_class = class_cost(outputs["y_pred"], y).mean()
-                loss = loss + loss_class
-                logs["loss_class"] += loss_class.detach()
-        if outputs["z_pred"] is not None:
-            nonzero = (outputs["v"][:, :, 0] != 0).sum(1)
-            loss_gen = gen_cost(outputs["v"], outputs["z_pred"]).sum((1, 2)) / nonzero
-            loss_gen = loss_gen.mean()
-            loss = loss + loss_gen
-            logs["loss_gen"] += loss_gen.detach()
-        if outputs["y_perturb"] is not None:
-            if use_event_loss:
-                event_mask = y >= 200
-                if event_mask.any():
-                    loss_event = torch.mean(
-                        outputs["alpha"][event_mask].squeeze(1)
-                        * class_cost(
-                            outputs["y_perturb"][event_mask][:, 200:],
-                            y[event_mask] - 200,
-                        )
-                    )
-                    logs["loss_event_perturb"] += loss_event.detach()
-                    loss = loss + loss_event
-                if (~event_mask).any():
-                    loss_class = torch.mean(
-                        outputs["alpha"][~event_mask].squeeze(1)
-                        * class_cost(
-                            outputs["y_perturb"][~event_mask][:, :200], y[~event_mask]
-                        )
-                    )
-                    logs["loss_perturb"] += loss_class.detach()
-                    loss = loss + loss_class
-
-            else:
-                loss_perturb = torch.mean(
-                    outputs["alpha"].squeeze(1) * class_cost(outputs["y_perturb"], y)
-                )
-                loss = loss + loss_perturb
-                logs["loss_perturb"] += loss_perturb.detach()
-
-        if use_clip and outputs["z_body"] is not None and outputs["x_body"] is not None:
-            loss_clip = clip_loss(
-                outputs["x_body"].view(X.shape[0], -1),
-                outputs["z_body"].view(X.shape[0], -1),
-                weight=outputs["alpha"],
+            get_loss(
+                outputs,
+                y,
+                class_cost,
+                gen_cost,
+                use_event_loss,
+                use_clip,
+                clip_loss,
+                logs,
             )
-            loss = loss + loss_clip
-            logs["loss_clip"] += loss_clip.detach()
-
-        logs["loss"] += loss.detach()
 
     if dist.is_initialized():
         for key in logs:
@@ -299,7 +249,7 @@ def test_step(
 def train_model(
     model,
     train_loader,
-    test_loader,
+    val_loader,
     optimizer,
     lr_scheduler,
     num_epochs=1,
@@ -316,6 +266,8 @@ def train_model(
     loss_init=np.inf,
     use_amp=False,
     run=None,
+    ema_model=None,
+    ema_decay=0.999,
 ):
     checkpoint_name = get_checkpoint_name(save_tag)
 
@@ -350,10 +302,12 @@ def train_model(
             iterations_per_epoch=iterations_per_epoch,
             use_amp=use_amp,
             gscaler=gscaler,
+            ema_model=ema_model,
+            ema_decay=ema_decay,
         )
-        val_logs = test_step(
+        val_logs = val_step(
             model,
-            test_loader,
+            val_loader,
             loss_class,
             loss_gen,
             epoch,
@@ -373,18 +327,17 @@ def train_model(
             print(
                 f"Class Loss: {train_logs['loss_class']:.4f}, Class Val Loss: {val_logs['loss_class']:.4f}"
             )
-            print(
-                f"Class Event Loss: {train_logs['loss_class_event']:.4f}, Class Event Val Loss: {val_logs['loss_class_event']:.4f}"
-            )
+            if use_event_loss:
+                print(
+                    f"Class Event Loss: {train_logs['loss_class_event']:.4f}, Class Event Val Loss: {val_logs['loss_class_event']:.4f}"
+                )
             print(
                 f"Gen Loss: {train_logs['loss_gen']:.4f}, Gen Val Loss: {val_logs['loss_gen']:.4f}"
             )
-            print(
-                f"Class Perturb Loss: {train_logs['loss_perturb']:.4f}, Class Val Perturb Loss: {val_logs['loss_perturb']:.4f}"
-            )
-            print(
-                f"CLIP loss: {train_logs['loss_clip']:.4f}, CLIP Val Loss: {val_logs['loss_clip']:.4f}"
-            )
+            if use_clip:
+                print(
+                    f"CLIP loss: {train_logs['loss_clip']:.4f}, CLIP Val Loss: {val_logs['loss_clip']:.4f}"
+                )
             print(
                 "Time taken for epoch {} is {} sec".format(epoch, time.time() - start)
             )
@@ -397,6 +350,7 @@ def train_model(
             print("replacing best checkpoint ...")
             save_checkpoint(
                 model,
+                ema_model,
                 epoch + 1,
                 optimizer,
                 losses["val_loss"][-1],
@@ -424,7 +378,14 @@ def train_model(
 
 
 def save_checkpoint(
-    model, epoch, optimizer, loss, lr_scheduler, checkpoint_dir, checkpoint_name
+    model,
+    ema_model,
+    epoch,
+    optimizer,
+    loss,
+    lr_scheduler,
+    checkpoint_dir,
+    checkpoint_name,
 ):
     save_dict = {
         "body": model.module.body.state_dict(),
@@ -439,6 +400,10 @@ def save_checkpoint(
 
     if model.module.generator is not None:
         save_dict["generator_head"] = model.module.generator.state_dict()
+    if ema_model is not None:
+        save_dict["ema_body"] = ema_model.body.state_dict()
+        if model.module.generator is not None:
+            save_dict["ema_generator"] = ema_model.generator.state_dict()
 
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
@@ -456,6 +421,7 @@ def restore_checkpoint(
     checkpoint_dir,
     checkpoint_name,
     device,
+    ema_model=None,
     is_main_node=False,
     fine_tune=False,
 ):
@@ -467,9 +433,10 @@ def restore_checkpoint(
 
     base_model = model.module if hasattr(model, "module") else model
     base_model.to(device)
-    base_model.body.load_state_dict(checkpoint["body"], strict=False)
 
     if not fine_tune:
+        base_model.body.load_state_dict(checkpoint["body"], strict=False)
+
         if base_model.classifier is not None and "classifier_head" in checkpoint:
             base_model.classifier.load_state_dict(
                 checkpoint["classifier_head"], strict=False
@@ -484,11 +451,31 @@ def restore_checkpoint(
         startEpoch = checkpoint["epoch"] + 1
         best_loss = checkpoint["loss"]
     else:
+        if base_model.body is not None and "body" in checkpoint:
+            body_state = checkpoint["body"]
+            model_state = base_model.body.state_dict()
+            filtered_state = {}
+            for k, v in body_state.items():
+                if k in model_state and model_state[k].shape == v.shape:
+                    filtered_state[k] = v
+                else:
+                    if is_main_node:
+                        print(
+                            f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
+                        )
+
+            base_model.body.load_state_dict(filtered_state, strict=False)
+
         if base_model.classifier is not None and "classifier_head" in checkpoint:
             classifier_state = checkpoint["classifier_head"]
             model_state = base_model.classifier.state_dict()
             filtered_state = {}
             for k, v in classifier_state.items():
+                if "out." in k:
+                    if is_main_node:
+                        print(f"Skipping {k}: explicitly excluded from loading")
+                    continue
+
                 if k in model_state and model_state[k].shape == v.shape:
                     filtered_state[k] = v
                 else:
@@ -500,10 +487,14 @@ def restore_checkpoint(
             base_model.classifier.load_state_dict(filtered_state, strict=False)
 
         if base_model.generator is not None:
-            classifier_state = checkpoint["generator_head"]
+            generator_state = checkpoint["generator_head"]
             model_state = base_model.generator.state_dict()
             filtered_state = {}
-            for k, v in classifier_state.items():
+            for k, v in generator_state.items():
+                if "out." in k:
+                    if is_main_node:
+                        print(f"Skipping {k}: explicitly excluded from loading")
+                    continue
                 if k in model_state and model_state[k].shape == v.shape:
                     filtered_state[k] = v
                 else:
@@ -516,6 +507,21 @@ def restore_checkpoint(
 
         startEpoch = 0.0
         best_loss = np.inf
+
+    if ema_model is not None:
+        ema_model.load_state_dict(base_model.state_dict())
+
+        # if "ema_body" in checkpoint:
+        #     ema_model.body.load_state_dict(checkpoint["ema_body"],strict=False)
+
+        #     if base_model.generator is not None:
+        #         ema_model.generator.load_state_dict(base_model.generator.state_dict())
+
+        # else:
+        #     if is_main_node:
+        #         print("No EMA body in checkpoint; starting fresh EMA")
+
+        #     ema_model.load_state_dict(base_model.state_dict())
 
     try:
         optimizer.load_state_dict(checkpoint["optimizer"])
@@ -540,8 +546,10 @@ def run(
     num_cond: bool = 3,
     use_pid: bool = False,
     pid_idx: int = -1,
+    pid_dim: int = 9,
     use_add: bool = False,
     num_add: int = 4,
+    zero_add: bool = False,
     use_clip: bool = False,
     use_event_loss: bool = False,
     num_classes: int = 2,
@@ -568,6 +576,7 @@ def run(
     mlp_drop: float = 0.1,
     feature_drop: float = 0.0,
     num_workers: int = 16,
+    clip_inputs: bool = False,
 ):
     local_rank, rank, size = ddp_setup()
     # set up model
@@ -586,6 +595,7 @@ def run(
         conditional=conditional,
         cond_dim=num_cond,
         pid=use_pid,
+        pid_dim=pid_dim,
         add_info=use_add,
         add_dim=num_add,
         use_time=False if mode == "classifier" else True,
@@ -616,15 +626,17 @@ def run(
         num_workers=num_workers,
         rank=rank,
         size=size,
+        zero_add=zero_add,
+        clip_inputs=clip_inputs,
     )
     if rank == 0:
         print("**** Setup ****")
         print(f"Train dataset len: {len(train_loader)}")
         print("************")
 
-    test_loader = load_data(
+    val_loader = load_data(
         dataset,
-        dataset_type="test",
+        dataset_type="val",
         use_pid=use_pid,
         pid_idx=pid_idx,
         use_add=use_add,
@@ -634,6 +646,8 @@ def run(
         num_workers=num_workers,
         rank=rank,
         size=size,
+        zero_add=zero_add,
+        clip_inputs=clip_inputs,
     )
 
     param_groups = get_param_groups(
@@ -652,15 +666,29 @@ def run(
 
     train_steps = len(train_loader) if iterations < 0 else iterations
 
-    # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optimizer, (train_steps * epoch)
-    # )
-
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=train_steps * warmup_epoch,
         num_training_steps=(train_steps * epoch),
     )
+
+    # Transfer model to GPU if available
+    kwarg = {}
+    if torch.cuda.is_available():
+        device = local_rank
+        model.to(local_rank)
+        kwarg["device_ids"] = [device]
+    else:
+        model.cpu()
+        device = "cpu"
+
+    model = DDP(
+        model,
+        **kwarg,
+    )
+
+    # Set up EMA model
+    ema_model = shadow_copy(model.module)
 
     epoch_init = 0
     loss_init = np.inf
@@ -678,9 +706,11 @@ def run(
             outdir,
             get_checkpoint_name(save_tag),
             local_rank,
+            ema_model=ema_model,
+            is_main_node=is_master_node(),
         )
 
-    if (
+    elif (
         os.path.isfile(os.path.join(outdir, get_checkpoint_name(pretrain_tag)))
         and fine_tune
     ):
@@ -696,24 +726,10 @@ def run(
             outdir,
             get_checkpoint_name(pretrain_tag),
             local_rank,
+            ema_model=ema_model,
             is_main_node=is_master_node(),
             fine_tune=fine_tune,
         )
-
-    # Transfer model to GPU if available
-    kwarg = {}
-    if torch.cuda.is_available():
-        device = local_rank
-        model.to(local_rank)
-        kwarg["device_ids"] = [device]
-    else:
-        model.cpu()
-        device = "cpu"
-
-    model = DDP(
-        model,
-        **kwarg,
-    )
 
     if wandb:
         import wandb
@@ -743,7 +759,7 @@ def run(
     train_model(
         model,
         train_loader,
-        test_loader,
+        val_loader,
         optimizer,
         lr_scheduler,
         num_epochs=epoch,
@@ -759,6 +775,7 @@ def run(
         loss_init=loss_init,
         use_amp=use_amp,
         run=run,
+        ema_model=ema_model,
     )
 
     dist.destroy_process_group()

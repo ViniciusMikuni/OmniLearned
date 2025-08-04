@@ -35,10 +35,15 @@ def train(
     num_cond: int = typer.Option(3, help="Number of global conditioning features"),
     use_pid: bool = typer.Option(False, help="Use particle ID for training"),
     pid_idx: int = typer.Option(4, help="Index of the PID in the input array"),
+    pid_dim: int = typer.Option(9, help="Number of unique PIDs"),
     use_add: bool = typer.Option(
         False, help="Use additional features beyond kinematic information"
     ),
     num_add: int = typer.Option(4, help="Number of additional features"),
+    zero_add: bool = typer.Option(
+        False,
+        help="Load the model with additional blocks but zero the inputs from the dataloader",
+    ),
     use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
     use_event_loss: bool = typer.Option(
         False, help="Use additional classification loss between physics process"
@@ -55,13 +60,16 @@ def train(
     epoch: int = typer.Option(10, help="Number of epochs"),
     warmup_epoch: int = typer.Option(1, help="Number of learning rate warmup epochs"),
     use_amp: bool = typer.Option(False, help="Use amp"),
+    clip_inputs: bool = typer.Option(
+        False, help="Clip input dataset to be within R=0.8 and atl least 500 MeV"
+    ),
     # Optimizer
     optim: str = typer.Option("lion", help="optimizer to use"),
     b1: float = typer.Option(0.95, help="Lion b1"),
     b2: float = typer.Option(0.98, help="Lion b2"),
     lr: float = typer.Option(5e-5, help="Learning rate"),
     lr_factor: float = typer.Option(
-        0.1, help="Learning rate reduction for fine-tuning"
+        1.0, help="Learning rate factor for new layers during fine-tuning"
     ),
     wd: float = typer.Option(0.0, help="Weight decay"),
     # Model
@@ -93,8 +101,10 @@ def train(
         num_cond,
         use_pid,
         pid_idx,
+        pid_dim,
         use_add,
         num_add,
+        zero_add,
         use_clip,
         use_event_loss,
         num_classes,
@@ -121,6 +131,7 @@ def train(
         mlp_drop,
         feature_drop,
         num_workers,
+        clip_inputs=clip_inputs,
     )
 
 
@@ -146,6 +157,10 @@ def evaluate(
         False, help="Use additional features beyond kinematic information"
     ),
     num_add: int = typer.Option(4, help="Number of additional features"),
+    zero_add: bool = typer.Option(
+        False,
+        help="Load the model with additional blocks but zero the inputs from the dataloader",
+    ),
     use_event_loss: bool = typer.Option(
         False, help="Use additional classification loss between physics process"
     ),
@@ -156,7 +171,10 @@ def evaluate(
         "classifier", help="Task to run: classifier, generator, pretrain"
     ),
     # Training options
-    batch: int = typer.Option(64, help="Batch size"),
+    batch: int = typer.Option(128, help="Batch size"),
+    clip_inputs: bool = typer.Option(
+        False, help="Clip input dataset to be within R=0.8 and atl least 500 MeV"
+    ),
     # Model
     num_transf: int = typer.Option(6, help="Number of transformer blocks"),
     num_transf_heads: int = typer.Option(
@@ -184,6 +202,7 @@ def evaluate(
         pid_idx,
         use_add,
         num_add,
+        zero_add,
         use_event_loss,
         num_classes,
         mode,
@@ -199,6 +218,7 @@ def evaluate(
         mlp_drop,
         feature_drop,
         num_workers,
+        clip_inputs=clip_inputs,
     )
 
 
@@ -212,6 +232,7 @@ def dataloader(
     ),
 ):
     for tag in ["train", "test", "val"]:
+        print(tag)
         load_data(dataset, folder, dataset_type=tag, distributed=False)
 
 

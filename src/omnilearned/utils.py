@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import Tuple
+from copy import deepcopy
 
 import torch.distributed as dist
 from torch.distributed import init_process_group, get_rank
@@ -18,6 +19,10 @@ def print_metrics(y_preds_np, y_np, thresholds=[0.3, 0.5], background_class=0):
         multi_class="ovo",
     )
     print(f"AUC: {auc_ovo:.4f}\n")
+
+    accuracy = metrics.accuracy_score(y_np, np.argmax(y_preds_np, axis=1))
+
+    print(f"ACC: {accuracy:.4f}\n")
 
     num_classes = y_preds_np.shape[1]
 
@@ -103,44 +108,82 @@ def sum_reduce(num, device):
     return rt
 
 
+def shadow_copy(model):
+    ema_model = deepcopy(model).eval()
+    for p in ema_model.parameters():
+        p.requires_grad_(False)
+    return ema_model
+
+
+def gather_tensors(x):
+    """
+    If running under DDP, all_gather x from every rank, concat, then return as numpy.
+    Otherwise just .cpu().numpy().
+    """
+    if dist.is_initialized():
+        ws = dist.get_world_size()
+        # pre‐allocate one buffer per rank
+        buf = [torch.zeros_like(x) for _ in range(ws)]
+        dist.all_gather(buf, x)
+        x = torch.cat(buf, dim=0)
+    return x.cpu()
+
+
 def get_param_groups(model, wd, lr, lr_factor=1.0, fine_tune=False):
     no_decay, decay = [], []
-    last_layer_no_decay, last_layer_decay = [], []
+    new_layer_no_decay, new_layer_decay = [], []
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
 
-        is_last_layer = name.startswith("classifier.out")
+        is_new_layer = name.startswith(
+            (
+                "classifier.out",
+                "generator.out",
+                "body.embed",
+                "body.local_physics",
+                "body.cond",
+            )
+        )
 
         if any(keyword in name for keyword in model.no_weight_decay()):
-            if is_last_layer:
-                last_layer_no_decay.append(param)
+            if is_new_layer:
+                new_layer_no_decay.append(param)
             else:
                 no_decay.append(param)
         else:
-            if is_last_layer:
-                last_layer_decay.append(param)
+            if is_new_layer:
+                new_layer_decay.append(param)
             else:
                 decay.append(param)
 
     # Base learning rate groups
+
     param_groups = [
         {"params": decay, "weight_decay": wd, "lr": lr},
         {"params": no_decay, "weight_decay": 0.0, "lr": lr},
     ]
 
-    # Adjust learning rate for last layer if fine-tuning
-    last_layer_lr = lr * lr_factor if fine_tune else lr
+    # Adjust learning rate for new layer if fine-tuning
+    new_layer_lr = lr * lr_factor if fine_tune else lr
 
-    if last_layer_decay:
+    if new_layer_decay:
         param_groups.append(
-            {"params": last_layer_decay, "weight_decay": wd, "lr": last_layer_lr}
+            {"params": new_layer_decay, "weight_decay": wd, "lr": new_layer_lr}
         )
-    if last_layer_no_decay:
+    if new_layer_no_decay:
         param_groups.append(
-            {"params": last_layer_no_decay, "weight_decay": 0.0, "lr": last_layer_lr}
+            {"params": new_layer_no_decay, "weight_decay": 0.0, "lr": new_layer_lr}
         )
+
+    # if fine_tune:
+    #     #Freeze body parts but input embeddings
+    #     for name, param in model.body.named_parameters():
+    #         if name.startswith("embed.") or name.startswith("local_physics.") or name.startswith("cond."):
+    #             continue
+    #         else:
+    #             param.requires_grad = False
 
     return param_groups
 

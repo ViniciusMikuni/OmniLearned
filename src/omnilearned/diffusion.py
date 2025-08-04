@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from torchdiffeq import odeint
 
 
 class MPFourier(nn.Module):
@@ -17,25 +18,70 @@ class MPFourier(nn.Module):
         return x.unsqueeze(-1) * y.to(x.dtype)
 
 
-@torch.compile
-def logsnr_schedule_cosine(t, logsnr_min=-20.0, logsnr_max=20.0, shift=1.0):
-    b = torch.atan(torch.exp(-0.5 * torch.tensor(logsnr_max)))
-    a = torch.atan(torch.exp(-0.5 * torch.tensor(logsnr_min))) - b
-    return -2.0 * torch.log(torch.tan(a * t + b) * shift)
-
-
-# @torch.compile
 def get_logsnr_alpha_sigma(time, shift=1.0):
-    logsnr = logsnr_schedule_cosine(time, shift=shift)[:, None, None]
-    alpha = torch.sqrt(torch.sigmoid(logsnr))
-    sigma = torch.sqrt(torch.sigmoid(-logsnr))
+    alpha = (1.0 - time)[:, None, None]
+    sigma = time[:, None, None]
+    logsnr = -2 * torch.log(sigma / (alpha + 1e-6))
     return logsnr, alpha, sigma
 
 
-def perturb(x, time):
-    mask = x[:, :, 3:4] != 0
-    eps = torch.randn_like(x)  # eps ~ N(0, 1)
+def get_ad_eps(x, mask):
+    means = torch.tensor(
+        [0.00027097, 0.0000285, 0.90671477, 1.29942334], device=x.device
+    )
+    stds = torch.tensor(
+        [0.30882706, 0.30609399, 1.23984054, 1.28986600], device=x.device
+    )
+
+    # Shape: (1, 1, 4) so it can broadcast across (B, N, 4)
+    means = means.view(1, 1, 4)
+    stds = stds.view(1, 1, 4)
+
+    eps = (torch.randn_like(x) * stds + means) * mask
+    return eps
+
+
+def perturb(x, time, noise=1e-4):
+    mask = x[:, :, 2:3] != 0
+    eps = torch.randn_like(x) * mask  # eps ~ N(0, 1)
+    # eps = get_ad_eps(x, mask)
+
     logsnr, alpha, sigma = get_logsnr_alpha_sigma(time)
-    z = alpha * x + eps * sigma
-    v = alpha * eps - sigma * x
-    return z * mask, v * mask
+    z = alpha * x + sigma * eps
+    return z, eps - x
+
+
+def network_wrapper(model, z, condition, pid, add_info, y, time):
+    base_model = model.module if hasattr(model, "module") else model
+    x = base_model.body(z, condition, pid, add_info, time)
+    x = base_model.generator(x, y)
+    return x
+
+
+def generate(
+    model, y, shape, cond=None, pid=None, add_info=None, nsteps=64, device="cuda"
+) -> torch.Tensor:
+    x = torch.randn(*shape).to(device)  # x_T ~ N(0, 1)
+    nsample = x.shape[0]
+    # Let's create the mask for the zero-padded particles
+    nparts = (100 * cond[:, -1]).int().view((-1, 1)).to(device)
+    max_part = x.shape[1]
+    mask = torch.tile(
+        torch.arange(max_part).to(device), (nparts.shape[0], 1)
+    ) < torch.tile(nparts, (1, max_part))
+
+    # x_0 = x*mask.float().unsqueeze(-1)
+    x_0 = get_ad_eps(x, mask.float().unsqueeze(-1))
+
+    def ode_wrapper(t, x_t):
+        time = t * torch.ones((nsample,)).to(device)
+        v = network_wrapper(model, x_t, cond, pid, add_info, y, time)
+        return v
+
+    x_t = odeint(
+        func=ode_wrapper,
+        y0=x_0,
+        t=torch.tensor(np.linspace(1, 0, nsteps)).to(device, dtype=x_0.dtype),
+        method="midpoint",
+    )
+    return x_t[-1]

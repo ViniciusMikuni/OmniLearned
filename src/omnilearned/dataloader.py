@@ -106,6 +106,8 @@ class HEPDataset(Dataset):
         use_add=False,
         num_add=4,
         label_shift=0,
+        zero_add=False,
+        clip_inputs=False,
     ):
         """
         Args:
@@ -122,6 +124,8 @@ class HEPDataset(Dataset):
         self.file_paths = file_paths
         self._file_cache = {}  # lazy cache for open h5py.File handles
         self.file_indices = file_indices
+        self.zero_add = zero_add
+        self.clip_inputs = clip_inputs
 
         # random.shuffle(self.file_indices)  # Shuffle data entries globally
 
@@ -142,14 +146,24 @@ class HEPDataset(Dataset):
         sample = {}
 
         sample["X"] = torch.tensor(f["data"][sample_idx], dtype=torch.float32)
+        if self.clip_inputs:
+            # Enforce particles to be inside R=0.8 and pT > 0.5 MeV
+            mask_part = (
+                (torch.hypot(sample["X"][:, 0], sample["X"][:, 1]) < 0.8)
+                & (sample["X"][:, 2] > -0.8)
+                & (sample["X"][:, 3] > -0.8)
+            )
+            sample["X"] = sample["X"] * mask_part.unsqueeze(-1).float()
+
         label = f["pid"][sample_idx]
         sample["y"] = torch.tensor(label - self.label_shift, dtype=torch.int64)
-
         if "global" in f:
             sample["cond"] = torch.tensor(f["global"][sample_idx], dtype=torch.float32)
 
         if self.use_pid:
             sample["pid"] = sample["X"][:, self.pid_idx].int()
+            if self.zero_add:
+                sample["pid"] = sample["pid"] * 0
             sample["X"] = torch.cat(
                 (sample["X"][:, : self.pid_idx], sample["X"][:, self.pid_idx + 1 :]),
                 dim=1,
@@ -157,6 +171,9 @@ class HEPDataset(Dataset):
         if self.use_add:
             # Assume any additional info appears last
             sample["add_info"] = sample["X"][:, -self.num_add :]
+            if self.zero_add:
+                sample["add_info"] = sample["add_info"] * 0.0
+
             sample["X"] = sample["X"][:, : -self.num_add]
         return sample
 
@@ -182,6 +199,8 @@ def load_data(
     num_workers=16,
     rank=0,
     size=1,
+    zero_add=False,  # Return zeros instead of additional info
+    clip_inputs=False,
 ):
     supported_datasets = [
         "top",
@@ -196,6 +215,13 @@ def load_data(
         "cms_qcd",
         "cms_bsm",
         "cms_top",
+        "aspen_top_ad_sb",
+        "aspen_top_ad_sr",
+        "aspen_bsm_ad_sb",
+        "aspen_bsm_ad_sr",
+        "jetnet150",
+        "jetnet30",
+        "custom",
     ]
     if dataset_name not in supported_datasets:
         raise ValueError(
@@ -267,6 +293,8 @@ def load_data(
         use_add=use_add,
         num_add=num_add,
         label_shift=label_shift.get(dataset_name, 0),
+        zero_add=zero_add,
+        clip_inputs=clip_inputs,
     )
 
     loader = DataLoader(

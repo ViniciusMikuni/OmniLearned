@@ -25,8 +25,8 @@ class PET2(nn.Module):
         mlp_ratio=2,
         norm_layer=DynamicTanh,
         act_layer=nn.GELU,
-        mlp_drop=0.1,
-        attn_drop=0.1,
+        mlp_drop=0.0,
+        attn_drop=0.0,
         feature_drop=0.0,
         num_tokens=4,
         K=15,
@@ -128,6 +128,7 @@ class PET2(nn.Module):
         )
         time = torch.rand(size=(x.shape[0],)).to(x.device)
         _, alpha, sigma = get_logsnr_alpha_sigma(time)
+
         if self.mode == "generator" or self.mode == "pretrain":
             z, v = perturb(x, time)
             z_body = self.body(z, cond, pid, add_info, time)
@@ -339,7 +340,6 @@ class PET_body(nn.Module):
             out_features=hidden_size,
             norm_layer=norm_layer,
             act_layer=act_layer,
-            use_cond=conditional,
         )
 
         if self.use_int:
@@ -352,7 +352,7 @@ class PET_body(nn.Module):
             )
 
         self.local_physics = LocalEmbeddingBlock(
-            in_features=input_dim + 3 if conditional else input_dim,
+            in_features=input_dim,
             hidden_features=mlp_ratio * hidden_size,
             out_features=hidden_size,
             act_layer=act_layer,
@@ -367,12 +367,14 @@ class PET_body(nn.Module):
 
         self.num_add = 0
         if self.conditional:
-            self.cond_embed = MLP(
-                in_features=cond_dim,
-                hidden_features=int(mlp_ratio * hidden_size),
-                out_features=hidden_size,
-                norm_layer=norm_layer,
-                act_layer=act_layer,
+            self.cond_embed = nn.Sequential(
+                MLP(
+                    in_features=cond_dim,
+                    hidden_features=hidden_size,
+                    out_features=hidden_size,
+                    norm_layer=norm_layer,
+                    act_layer=act_layer,
+                )
             )
             self.num_add += 1
 
@@ -451,7 +453,7 @@ class PET_body(nn.Module):
         mask = x[:, :, 3:4] != 0
         token = self.token.expand(B, -1, -1)
 
-        x_embed, x = self.embed(x, cond, mask)
+        x_embed, x = self.embed(x, mask)
 
         # Move away zero-padded entries
         coord_shift = 999.0 * (~mask).float()

@@ -108,32 +108,19 @@ class InputBlock(nn.Module):
         act_layer=nn.LeakyReLU,
         mlp_drop=0.0,
         norm_layer=nn.LayerNorm,
-        use_cond=True,
     ):
         super().__init__()
-        self.use_cond = use_cond
         self.mlp = MLP(
-            in_features=in_features + 3 if use_cond else in_features,
+            in_features=in_features,
             hidden_features=hidden_features,
             out_features=out_features,
             norm_layer=norm_layer,
             drop=mlp_drop,
             act_layer=act_layer,
         )
-        self.norm = norm_layer(in_features + 3 if use_cond else in_features)
+        self.norm = norm_layer(in_features)
 
-    def forward(self, x, j, mask):
-        if j is not None and self.use_cond:
-            x_physics = torch.stack(
-                [
-                    x[:, :, 2] - j[:, 0].unsqueeze(-1),
-                    x[:, :, 3] - j[:, 1].unsqueeze(-1),
-                    torch.hypot(x[:, :, 0], x[:, :, 1]),
-                ],
-                -1,
-            )
-            x = torch.cat([x, x_physics], -1)
-
+    def forward(self, x, mask):
         x_mlp = self.mlp(self.norm(x), mask)
         return x_mlp, x
 
