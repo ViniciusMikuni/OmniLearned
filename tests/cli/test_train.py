@@ -5,7 +5,7 @@ from typer.testing import CliRunner
 
 from omnilearned.cli import app
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def test_train(test_dataset_name, test_dataset_path):
