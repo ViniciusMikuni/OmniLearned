@@ -27,10 +27,11 @@ def get_logsnr_alpha_sigma(time, shift=1.0):
 
 def get_ad_eps(x, mask):
     means = torch.tensor(
-        [0.00027097, 0.0000285, 0.90671477, 1.29942334], device=x.device
+        [0.00027097, 0.0000285, 1.5226484088190595, 1.8621652103564585], device=x.device
     )
     stds = torch.tensor(
-        [0.30882706, 0.30609399, 1.23984054, 1.28986600], device=x.device
+        [0.30882706, 0.30609399, 1.1469092510630179, 1.1953085800378445],
+        device=x.device,
     )
 
     # Shape: (1, 1, 4) so it can broadcast across (B, N, 4)
@@ -43,8 +44,8 @@ def get_ad_eps(x, mask):
 
 def perturb(x, time, noise=1e-4):
     mask = x[:, :, 2:3] != 0
-    eps = torch.randn_like(x) * mask  # eps ~ N(0, 1)
-    # eps = get_ad_eps(x, mask)
+    # eps = torch.randn_like(x) * mask  # eps ~ N(0, 1)
+    eps = get_ad_eps(x, mask)
 
     logsnr, alpha, sigma = get_logsnr_alpha_sigma(time)
     z = alpha * x + sigma * eps
@@ -59,7 +60,7 @@ def network_wrapper(model, z, condition, pid, add_info, y, time):
 
 
 def generate(
-    model, y, shape, cond=None, pid=None, add_info=None, nsteps=64, device="cuda"
+    model, y, shape, cond=None, pid=None, add_info=None, nsteps=256, device="cuda"
 ) -> torch.Tensor:
     x = torch.randn(*shape).to(device)  # x_T ~ N(0, 1)
     nsample = x.shape[0]
