@@ -164,8 +164,7 @@ class InteractionBlock(nn.Module):
         # reshape to [B*H, M, M]
         out = einops.rearrange(out, "b n1 n2 h -> (b h) n1 n2")
         # bias = out.reshape(-1, M, M)
-
-        # x_int = self.mlp_int(x_int) * mask_event
+        
         return out
 
 
@@ -368,14 +367,13 @@ class AttBlock(nn.Module):
             x = self.skip_linear(torch.cat([x, skip], dim=-1)) * mask
 
         x_norm = self.norm1(x * mask)
-
         x = (
             x
             + self.attn(
                 query=x_norm,
                 key=x_norm,
                 value=x_norm,
-                # key_padding_mask=~mask[:,:,0],
+                key_padding_mask=~mask[:, :, 0] if attn_mask is None else None,
                 attn_mask=attn_mask,
                 need_weights=False,
             )[0]

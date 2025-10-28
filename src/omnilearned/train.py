@@ -16,7 +16,12 @@ from omnilearned.utils import (
     CLIPLoss,
     get_checkpoint_name,
     shadow_copy,
+    get_loss,
+    save_checkpoint,
+    restore_checkpoint,
+    get_model_parameters
 )
+
 import time
 import os
 import torch.amp as amp
@@ -25,72 +30,16 @@ torch.set_float32_matmul_precision("high")
 torch._dynamo.config.verbose = False
 
 
-def get_class_loss(weight, pred, y, class_cost, use_event_loss=False, logs={}):
-    loss = 0.0
-    if use_event_loss:
-        event_mask = y >= 200
-        if event_mask.any():
-            loss_event = torch.mean(
-                weight[event_mask]
-                * class_cost(pred[event_mask][:, 200:], y[event_mask] - 200)
-            )
-            logs["loss_class_event"] += loss_event.detach()
-            loss = loss + loss_event
-        if (~event_mask).any():
-            loss_class = torch.mean(
-                weight[~event_mask]
-                * class_cost(pred[~event_mask][:, :200], y[~event_mask])
-            )
-            logs["loss_class"] += loss_class.detach()
-            loss = loss + loss_class
-    else:
-        loss_class = torch.mean(weight * class_cost(pred, y))
-        loss = loss + loss_class
-        logs["loss_class"] += loss_class.detach()
-
-    return loss
-
-
-def get_loss(
-    outputs, y, class_cost, gen_cost, use_event_loss, use_clip, clip_loss, logs
-):
-    loss = 0.0
-    if outputs["y_pred"] is not None:
-        counts = torch.bincount(y, minlength=outputs["y_pred"].shape[-1]).float()
-        class_weights = 1.0 / (counts + 1e-6)
-        weights = class_weights[y]
-        weights = weights / weights.mean()
-        loss = loss + get_class_loss(
-            weights, outputs["y_pred"], y, class_cost, use_event_loss, logs
-        )
-
-    if outputs["z_pred"] is not None:
-        nonzero = (outputs["v"][:, :, 0] != 0).sum(1)
-        loss_gen = gen_cost(outputs["v"], outputs["z_pred"]).sum((1, 2)) / nonzero
-        loss_gen = loss_gen.mean()
-        loss = loss + loss_gen
-        logs["loss_gen"] += loss_gen.detach()
-    if outputs["y_perturb"] is not None:
-        counts = torch.bincount(y, minlength=outputs["y_pred"].shape[-1]).float()
-        class_weights = 1.0 / (counts + 1e-6)
-        weights = class_weights[y]
-        weights = outputs["alpha"].squeeze() * weights / weights.mean()
-        loss = loss + get_class_loss(
-            weights, outputs["y_perturb"], y, class_cost, use_event_loss, logs
-        )
-
-    if use_clip and outputs["z_body"] is not None and outputs["x_body"] is not None:
-        loss_clip = clip_loss(
-            outputs["x_body"].view(outputs["x_body"].shape[0], -1),
-            outputs["z_body"].view(outputs["x_body"].shape[0], -1),
-            weight=outputs["alpha"],
-        )
-        loss = loss + loss_clip
-        logs["loss_clip"] += loss_clip.detach()
-
-    logs["loss"] += loss.detach()
-    return loss
-
+def get_logs(device):
+    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
+    logs = {}
+    logs["loss"] = logs_buff[0].view(-1)
+    logs["loss_class"] = logs_buff[1].view(-1)
+    logs["loss_gen"] = logs_buff[2].view(-1)
+    logs["loss_clip"] = logs_buff[3].view(-1)
+    logs["loss_class_event"] = logs_buff[4].view(-1)
+    return logs
+    
 
 def train_step(
     model,
@@ -99,7 +48,6 @@ def train_step(
     gen_cost,
     optimizer,
     scheduler,
-    epoch,
     device,
     clip_loss=CLIPLoss(),
     use_clip=False,
@@ -108,18 +56,12 @@ def train_step(
     use_amp=False,
     gscaler=None,
     ema_model=None,
-    ema_decay=0.999,
+    ema_decay=0.9999,
 ):
     model.train()
 
-    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
-    logs = {}
-    logs["loss"] = logs_buff[0].view(-1)
-    logs["loss_class"] = logs_buff[1].view(-1)
-    logs["loss_gen"] = logs_buff[2].view(-1)
-    logs["loss_clip"] = logs_buff[3].view(-1)
-    logs["loss_class_event"] = logs_buff[4].view(-1)
-
+    logs = get_logs(device)
+    
     if iterations_per_epoch < 0:
         iterations_per_epoch = len(dataloader)
 
@@ -134,12 +76,20 @@ def train_step(
 
         # for batch_idx, batch in enumerate(dataloader):
         optimizer.zero_grad()  # Zero the gradients
+        
         X, y = batch["X"].to(device, dtype=torch.float), batch["y"].to(device)
+        
         model_kwargs = {
             key: (batch[key].to(device) if batch[key] is not None else None)
             for key in ["cond", "pid", "add_info"]
             if key in batch
         }
+        
+        if batch.get("data_pid") is not None:
+            data_pid = batch["data_pid"].to(device)
+        else:
+            data_pid = None
+
 
         with amp.autocast(
             "cuda:{}".format(device) if torch.cuda.is_available() else "cpu",
@@ -155,6 +105,7 @@ def train_step(
                 use_clip,
                 clip_loss,
                 logs,
+                data_pid=data_pid,
             )
 
         if use_amp and gscaler is not None:
@@ -189,7 +140,6 @@ def val_step(
     dataloader,
     class_cost,
     gen_cost,
-    epoch,
     device,
     clip_loss=CLIPLoss(),
     use_clip=False,
@@ -198,19 +148,12 @@ def val_step(
 ):
     model.eval()
 
-    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
-    logs = {}
-    logs["loss"] = logs_buff[0].view(-1)
-    logs["loss_class"] = logs_buff[1].view(-1)
-    logs["loss_gen"] = logs_buff[2].view(-1)
-    logs["loss_clip"] = logs_buff[3].view(-1)
-    logs["loss_class_event"] = logs_buff[4].view(-1)
+    logs = get_logs(device)
 
     if iterations_per_epoch < 0:
         iterations_per_epoch = len(dataloader)
 
     data_iter = iter(dataloader)
-
     for batch_idx in range(iterations_per_epoch):
         try:
             batch = next(data_iter)
@@ -225,6 +168,12 @@ def val_step(
             for key in ["cond", "pid", "add_info"]
             if key in batch
         }
+
+        if batch.get("data_pid") is not None:
+            data_pid = batch["data_pid"].to(device)
+        else:
+            data_pid = None
+
         with torch.no_grad():
             outputs = model(X, y, **model_kwargs)
             get_loss(
@@ -236,6 +185,7 @@ def val_step(
                 use_clip,
                 clip_loss,
                 logs,
+                data_pid=data_pid,
             )
 
     if dist.is_initialized():
@@ -295,7 +245,6 @@ def train_model(
             loss_gen,
             optimizer,
             lr_scheduler,
-            epoch,
             device,
             use_clip=use_clip,
             use_event_loss=use_event_loss,
@@ -310,7 +259,6 @@ def train_model(
             val_loader,
             loss_class,
             loss_gen,
-            epoch,
             device,
             use_clip=use_clip,
             use_event_loss=use_event_loss,
@@ -377,159 +325,6 @@ def train_model(
         json.dump(losses, open(f"{output_dir}/training_{save_tag}.json", "w"))
 
 
-def save_checkpoint(
-    model,
-    ema_model,
-    epoch,
-    optimizer,
-    loss,
-    lr_scheduler,
-    checkpoint_dir,
-    checkpoint_name,
-):
-    save_dict = {
-        "body": model.module.body.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "epoch": epoch,
-        "loss": loss,
-        "sched": lr_scheduler.state_dict(),
-    }
-
-    if model.module.classifier is not None:
-        save_dict["classifier_head"] = model.module.classifier.state_dict()
-
-    if model.module.generator is not None:
-        save_dict["generator_head"] = model.module.generator.state_dict()
-    if ema_model is not None:
-        save_dict["ema_body"] = ema_model.body.state_dict()
-        if model.module.generator is not None:
-            save_dict["ema_generator"] = ema_model.generator.state_dict()
-
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
-
-    torch.save(save_dict, os.path.join(checkpoint_dir, checkpoint_name))
-    print(
-        f"Epoch {epoch} | Training checkpoint saved at {os.path.join(checkpoint_dir, checkpoint_name)}"
-    )
-
-
-def restore_checkpoint(
-    model,
-    optimizer,
-    lr_scheduler,
-    checkpoint_dir,
-    checkpoint_name,
-    device,
-    ema_model=None,
-    is_main_node=False,
-    fine_tune=False,
-):
-    device = "cuda:{}".format(device) if torch.cuda.is_available() else "cpu"
-    checkpoint = torch.load(
-        os.path.join(checkpoint_dir, checkpoint_name),
-        map_location=device,
-    )
-
-    base_model = model.module if hasattr(model, "module") else model
-    base_model.to(device)
-
-    if not fine_tune:
-        base_model.body.load_state_dict(checkpoint["body"], strict=False)
-
-        if base_model.classifier is not None and "classifier_head" in checkpoint:
-            base_model.classifier.load_state_dict(
-                checkpoint["classifier_head"], strict=False
-            )
-
-        if base_model.generator is not None:
-            base_model.generator.load_state_dict(
-                checkpoint["generator_head"], strict=False
-            )
-
-        lr_scheduler.load_state_dict(checkpoint["sched"])
-        startEpoch = checkpoint["epoch"] + 1
-        best_loss = checkpoint["loss"]
-    else:
-        if base_model.body is not None and "body" in checkpoint:
-            body_state = checkpoint["body"]
-            model_state = base_model.body.state_dict()
-            filtered_state = {}
-            for k, v in body_state.items():
-                if k in model_state and model_state[k].shape == v.shape:
-                    filtered_state[k] = v
-                else:
-                    if is_main_node:
-                        print(
-                            f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
-                        )
-
-            base_model.body.load_state_dict(filtered_state, strict=False)
-
-        if base_model.classifier is not None and "classifier_head" in checkpoint:
-            classifier_state = checkpoint["classifier_head"]
-            model_state = base_model.classifier.state_dict()
-            filtered_state = {}
-            for k, v in classifier_state.items():
-                if "out." in k:
-                    if is_main_node:
-                        print(f"Skipping {k}: explicitly excluded from loading")
-                    continue
-
-                if k in model_state and model_state[k].shape == v.shape:
-                    filtered_state[k] = v
-                else:
-                    if is_main_node:
-                        print(
-                            f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
-                        )
-
-            base_model.classifier.load_state_dict(filtered_state, strict=False)
-
-        if base_model.generator is not None:
-            generator_state = checkpoint["generator_head"]
-            model_state = base_model.generator.state_dict()
-            filtered_state = {}
-            for k, v in generator_state.items():
-                if "out." in k:
-                    if is_main_node:
-                        print(f"Skipping {k}: explicitly excluded from loading")
-                    continue
-                if k in model_state and model_state[k].shape == v.shape:
-                    filtered_state[k] = v
-                else:
-                    if is_main_node:
-                        print(
-                            f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
-                        )
-
-            base_model.generator.load_state_dict(filtered_state, strict=False)
-
-        startEpoch = 0.0
-        best_loss = np.inf
-
-    if ema_model is not None:
-        ema_model.load_state_dict(base_model.state_dict())
-
-        # if "ema_body" in checkpoint:
-        #     ema_model.body.load_state_dict(checkpoint["ema_body"],strict=False)
-
-        #     if base_model.generator is not None:
-        #         ema_model.generator.load_state_dict(base_model.generator.state_dict())
-
-        # else:
-        #     if is_main_node:
-        #         print("No EMA body in checkpoint; starting fresh EMA")
-
-        #     ema_model.load_state_dict(base_model.state_dict())
-
-    try:
-        optimizer.load_state_dict(checkpoint["optimizer"])
-    except Exception:
-        if is_main_node:
-            print("Optimizer cannot be loaded back, skipping...")
-
-    return startEpoch, best_loss
 
 
 def run(
@@ -542,6 +337,8 @@ def run(
     fine_tune: bool = False,
     resuming: bool = False,
     num_feat: int = 4,
+    model_size: str = "small",
+    interaction: bool = False,
     conditional: bool = False,
     num_cond: bool = 3,
     use_pid: bool = False,
@@ -553,6 +350,7 @@ def run(
     use_clip: bool = False,
     use_event_loss: bool = False,
     num_classes: int = 2,
+    num_gen_classes: int = 1,
     mode: str = "classifier",
     batch: int = 64,
     iterations: int = -1,
@@ -560,18 +358,12 @@ def run(
     warmup_epoch: int = 1,
     use_amp: bool = False,
     optim: str = "lion",
+    sched: str = "cosine",
     b1: float = 0.95,
     b2: float = 0.98,
     lr: float = 5e-4,
     lr_factor: float = 10.0,
     wd: float = 0.3,
-    num_transf: int = 6,
-    num_transf_heads: int = 2,
-    num_tokens: int = 4,
-    num_head: int = 8,
-    K: int = 15,
-    base_dim: int = 64,
-    mlp_ratio: int = 2,
     attn_drop: float = 0.1,
     mlp_drop: float = 0.1,
     feature_drop: float = 0.0,
@@ -579,28 +371,27 @@ def run(
     clip_inputs: bool = False,
 ):
     local_rank, rank, size = ddp_setup()
+
+    model_params = get_model_parameters(model_size)
+
+
     # set up model
     model = PET2(
         input_dim=num_feat,
-        hidden_size=base_dim,
-        num_transformers=num_transf,
-        num_transformers_head=num_transf_heads,
-        num_heads=num_head,
-        mlp_ratio=mlp_ratio,
-        mlp_drop=mlp_drop,
-        attn_drop=attn_drop,
-        feature_drop=feature_drop,
-        num_tokens=num_tokens,
-        K=K,
+        use_int=interaction,
         conditional=conditional,
         cond_dim=num_cond,
         pid=use_pid,
         pid_dim=pid_dim,
         add_info=use_add,
         add_dim=num_add,
-        use_time=False if mode == "classifier" else True,
         mode=mode,
         num_classes=num_classes,
+        num_gen_classes=num_gen_classes,
+        mlp_drop=mlp_drop,
+        attn_drop=attn_drop,
+        feature_drop=feature_drop,    
+        **model_params,
     )
 
     if rank == 0:
@@ -617,6 +408,7 @@ def run(
     train_loader = load_data(
         dataset,
         dataset_type="train",
+        use_cond=conditional,
         use_pid=use_pid,
         pid_idx=pid_idx,
         use_add=use_add,
@@ -626,8 +418,8 @@ def run(
         num_workers=num_workers,
         rank=rank,
         size=size,
-        zero_add=zero_add,
         clip_inputs=clip_inputs,
+        ftag=mode == "ftag",
     )
     if rank == 0:
         print("**** Setup ****")
@@ -637,6 +429,7 @@ def run(
     val_loader = load_data(
         dataset,
         dataset_type="val",
+        use_cond=conditional,
         use_pid=use_pid,
         pid_idx=pid_idx,
         use_add=use_add,
@@ -646,8 +439,9 @@ def run(
         num_workers=num_workers,
         rank=rank,
         size=size,
-        zero_add=zero_add,
+
         clip_inputs=clip_inputs,
+        ftag=mode == "ftag",
     )
 
     param_groups = get_param_groups(
@@ -658,19 +452,32 @@ def run(
         raise ValueError(
             f"Optimizer '{optim}' not supported. Choose from adam or lion."
         )
+    if sched not in ["cosine", "onecycle"]:
+        raise ValueError(
+            f"Scheduler '{sched}' not supported. Choose from cosine or onecycle."
+        )
 
     if optim == "lion":
         optimizer = Lion(param_groups, betas=(b1, b2))
-    if optim == "adam":
+    elif optim == "adam":
         optimizer = torch.optim.AdamW(param_groups)
 
     train_steps = len(train_loader) if iterations < 0 else iterations
 
-    lr_scheduler = get_cosine_schedule_with_warmup(
-        optimizer=optimizer,
-        num_warmup_steps=train_steps * warmup_epoch,
-        num_training_steps=(train_steps * epoch),
-    )
+
+    if sched == 'onecycle':
+        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer=optimizer,
+            total_steps=(train_steps * epoch),
+            max_lr=lr,
+            pct_start = 0.1,
+        )
+    elif sched == 'cosine':
+        lr_scheduler = get_cosine_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=train_steps * warmup_epoch,
+            num_training_steps=(train_steps * epoch),
+        )
 
     # Transfer model to GPU if available
     kwarg = {}
@@ -692,44 +499,36 @@ def run(
 
     epoch_init = 0
     loss_init = np.inf
+    checkpoint_name = None
 
     if os.path.isfile(os.path.join(outdir, get_checkpoint_name(save_tag))) and resuming:
         if is_master_node():
             print(
                 f"Continue training with checkpoint from {os.path.join(outdir, get_checkpoint_name(save_tag))}"
             )
+        checkpoint_name = get_checkpoint_name(save_tag)
+        fine_tune = False
 
-        epoch_init, loss_init = restore_checkpoint(
-            model,
-            optimizer,
-            lr_scheduler,
-            outdir,
-            get_checkpoint_name(save_tag),
-            local_rank,
-            ema_model=ema_model,
-            is_main_node=is_master_node(),
-        )
-
-    elif (
-        os.path.isfile(os.path.join(outdir, get_checkpoint_name(pretrain_tag)))
-        and fine_tune
-    ):
+    elif fine_tune:
         if is_master_node():
             print(
                 f"Will fine-tune using checkpoint {os.path.join(outdir, get_checkpoint_name(pretrain_tag))}"
             )
-
+        checkpoint_name = get_checkpoint_name(pretrain_tag)
+        
+    if checkpoint_name is not None:
         epoch_init, loss_init = restore_checkpoint(
             model,
-            optimizer,
-            lr_scheduler,
             outdir,
-            get_checkpoint_name(pretrain_tag),
+            checkpoint_name,
             local_rank,
-            ema_model=ema_model,
             is_main_node=is_master_node(),
-            fine_tune=fine_tune,
+            ema_model=ema_model,
+            optimizer = optimizer,
+            lr_scheduler = lr_scheduler,
+            fine_tune = fine_tune
         )
+
 
     if wandb:
         import wandb
@@ -765,7 +564,9 @@ def run(
         num_epochs=epoch,
         device=device,
         loss_class=nn.CrossEntropyLoss(reduction="none"),
-        loss_gen=nn.MSELoss(reduction="none"),
+        loss_gen=nn.MSELoss(reduction="none")
+        if mode != "ftag"
+        else nn.CrossEntropyLoss(reduction="none"),
         output_dir=outdir,
         save_tag=save_tag,
         use_clip=use_clip,

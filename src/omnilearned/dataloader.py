@@ -38,13 +38,14 @@ def collate_point_cloud(batch, max_part=150):
     # Use validity mask based on feature index 2
     valid_mask = point_clouds[:, :, 2] != 0
     max_particles = min(valid_mask.sum(dim=1).max().item(), max_part)
+    #max_particles = point_clouds.shape[1]
 
     # Truncate point clouds
     truncated_X = point_clouds[:, :max_particles, :]  # (B, M, F)
     result = {"X": truncated_X, "y": labels}
 
     # Handle optional fields in a loop to reduce code duplication
-    optional_fields = ["cond", "pid", "add_info"]
+    optional_fields = ["cond", "pid", "add_info", "data_pid", "vertex_pid"]
     for field in optional_fields:
         if all(field in item for item in batch):
             stacked = torch.stack([item[field] for item in batch])
@@ -64,6 +65,7 @@ def get_url(dataset_name, dataset_type, base_url="https://portal.nersc.gov/cfs/m
         requests.head(url, allow_redirects=True, timeout=5)
         return url
     except requests.RequestException:
+        print("ERROR: Request timed out, visit https://www.nersc.gov/users/status for status on  portal.nersc.gov")
         return None
 
 
@@ -101,13 +103,14 @@ class HEPDataset(Dataset):
         self,
         file_paths,
         file_indices=None,
+        use_cond=False,
         use_pid=False,
         pid_idx=4,
         use_add=False,
         num_add=4,
         label_shift=0,
-        zero_add=False,
         clip_inputs=False,
+        ftag=False,
     ):
         """
         Args:
@@ -115,6 +118,7 @@ class HEPDataset(Dataset):
             use_pid (bool): Flag to select if PID information is used during training
             use_add (bool): Flags to select if additional information besides kinematics are used
         """
+        self.use_cond = use_cond
         self.use_pid = use_pid
         self.use_add = use_add
         self.pid_idx = pid_idx
@@ -124,8 +128,8 @@ class HEPDataset(Dataset):
         self.file_paths = file_paths
         self._file_cache = {}  # lazy cache for open h5py.File handles
         self.file_indices = file_indices
-        self.zero_add = zero_add
         self.clip_inputs = clip_inputs
+        self.ftag = ftag
 
         # random.shuffle(self.file_indices)  # Shuffle data entries globally
 
@@ -148,22 +152,19 @@ class HEPDataset(Dataset):
         sample["X"] = torch.tensor(f["data"][sample_idx], dtype=torch.float32)
         if self.clip_inputs:
             # Enforce particles to be inside R=0.8 and pT > 0.5 MeV
-            mask_part = (
-                (torch.hypot(sample["X"][:, 0], sample["X"][:, 1]) < 0.8)
-                & (sample["X"][:, 2] > -0.8)
-                & (sample["X"][:, 3] > -0.8)
+            mask_part = (torch.hypot(sample["X"][:, 0], sample["X"][:, 1]) < 0.8) & (
+                sample["X"][:, 2] > 0.0
             )
+            sample["X"][:, 3] = np.clip(sample["X"][:, 3], a_min=sample["X"][:, 2],a_max=None)
             sample["X"] = sample["X"] * mask_part.unsqueeze(-1).float()
 
         label = f["pid"][sample_idx]
         sample["y"] = torch.tensor(label - self.label_shift, dtype=torch.int64)
-        if "global" in f:
+        if "global" in f and self.use_cond:
             sample["cond"] = torch.tensor(f["global"][sample_idx], dtype=torch.float32)
 
         if self.use_pid:
             sample["pid"] = sample["X"][:, self.pid_idx].int()
-            if self.zero_add:
-                sample["pid"] = sample["pid"] * 0
             sample["X"] = torch.cat(
                 (sample["X"][:, : self.pid_idx], sample["X"][:, self.pid_idx + 1 :]),
                 dim=1,
@@ -171,10 +172,12 @@ class HEPDataset(Dataset):
         if self.use_add:
             # Assume any additional info appears last
             sample["add_info"] = sample["X"][:, -self.num_add :]
-            if self.zero_add:
-                sample["add_info"] = sample["add_info"] * 0.0
-
             sample["X"] = sample["X"][:, : -self.num_add]
+        if self.ftag:
+            sample["data_pid"] = torch.tensor(
+                f["data_pid"][sample_idx], dtype=torch.int64
+            )
+
         return sample
 
     def __del__(self):
@@ -192,6 +195,7 @@ def load_data(
     batch=100,
     dataset_type="train",
     distributed=True,
+    use_cond=False,
     use_pid=False,
     pid_idx=4,
     use_add=False,
@@ -199,8 +203,9 @@ def load_data(
     num_workers=16,
     rank=0,
     size=1,
-    zero_add=False,  # Return zeros instead of additional info
     clip_inputs=False,
+    ftag=False,  # special flag for atlas ftag
+    shuffle = True
 ):
     supported_datasets = [
         "top",
@@ -215,12 +220,14 @@ def load_data(
         "cms_qcd",
         "cms_bsm",
         "cms_top",
+        "aspen_bsm",
         "aspen_top_ad_sb",
         "aspen_top_ad_sr",
-        "aspen_bsm_ad_sb",
-        "aspen_bsm_ad_sr",
+        "aspen_top_ad_sr_hl",
         "jetnet150",
         "jetnet30",
+        "dctr",
+        "atlas_flav",
         "custom",
     ]
     if dataset_name not in supported_datasets:
@@ -256,7 +263,10 @@ def load_data(
 
         index_file = dataset_path / "file_index.npy"
         if index_file.is_file():
-            indices = np.load(index_file, mmap_mode="r")[rank::size]
+            if shuffle:
+                indices = np.load(index_file, mmap_mode="r")[rank::size]
+            else:
+                indices = np.load(index_file, mmap_mode="r")[len(np.load(index_file, mmap_mode="r")) * rank // size : len(np.load(index_file, mmap_mode="r")) * (rank + 1) // size]   
             file_indices.extend(
                 (file_idx + index_shift, sample_idx) for file_idx, sample_idx in indices
             )
@@ -288,23 +298,24 @@ def load_data(
     data = HEPDataset(
         file_list,
         file_indices,
+        use_cond=use_cond,
         use_pid=use_pid,
         pid_idx=pid_idx,
         use_add=use_add,
         num_add=num_add,
         label_shift=label_shift.get(dataset_name, 0),
-        zero_add=zero_add,
         clip_inputs=clip_inputs,
+        ftag=ftag,
     )
 
     loader = DataLoader(
         data,
         batch_size=batch,
         pin_memory=torch.cuda.is_available(),
-        shuffle=True,
+        shuffle=shuffle,
         sampler=None,
         num_workers=num_workers,
-        drop_last=True,
+        drop_last=False,
         collate_fn=collate_point_cloud,
     )
     return loader

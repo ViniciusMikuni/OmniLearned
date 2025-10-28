@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+
 from omnilearned.layers import (
     NoScaleDropout,
     InteractionBlock,
@@ -18,18 +19,6 @@ class PET2(nn.Module):
     def __init__(
         self,
         input_dim,
-        hidden_size,
-        num_transformers=2,
-        num_transformers_head=2,
-        num_heads=4,
-        mlp_ratio=2,
-        norm_layer=DynamicTanh,
-        act_layer=nn.GELU,
-        mlp_drop=0.0,
-        attn_drop=0.0,
-        feature_drop=0.0,
-        num_tokens=4,
-        K=15,
         use_int=True,
         conditional=False,
         cond_dim=3,
@@ -37,18 +26,31 @@ class PET2(nn.Module):
         pid_dim=9,
         add_info=False,
         add_dim=4,
-        use_time=False,
         mode="classifier",
         num_classes=2,
+        num_gen_classes=1,            
+        base_dim = 128,
+        num_transformers=2,
+        num_transformers_head=2,
+        num_tokens=4,
+        num_heads=4,
+        mlp_ratio=2,
+        norm_layer=DynamicTanh,
+        act_layer=nn.GELU,
+        mlp_drop=0.0,
+        attn_drop=0.0,
+        feature_drop=0.0,
+        K=15,
+        skip=False,
     ):
         super().__init__()
         self.mode = mode
-        if self.mode not in ["classifier", "generator", "pretrain"]:
+        if self.mode not in ["classifier", "generator", "pretrain", "ftag"]:
             raise ValueError(f"Mode '{self.mode}' not supported.")
 
         self.body = PET_body(
             input_dim,
-            hidden_size,
+            base_dim,
             num_transformers=num_transformers,
             num_transf_local=num_transformers_head,
             num_heads=num_heads,
@@ -67,15 +69,17 @@ class PET2(nn.Module):
             pid_dim=pid_dim,
             add_info=add_info,
             add_dim=add_dim,
-            use_time=use_time,
+            use_time=self.mode in ['generator','pretrain'],
+            skip=skip,
         )
 
         self.num_add = self.body.num_add
+        self.num_tokens = num_tokens
         self.classifier = None
         self.generator = None
-        if self.mode == "classifier" or self.mode == "pretrain":
+        if self.mode == "classifier" or self.mode == "pretrain" or self.mode == "ftag":
             self.classifier = PET_classifier(
-                hidden_size,
+                base_dim,
                 num_transformers=num_transformers_head,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
@@ -87,10 +91,12 @@ class PET2(nn.Module):
                 num_classes=num_classes,
             )
 
-        if self.mode == "generator" or self.mode == "pretrain":
+        if self.mode == "generator" or self.mode == "pretrain" or self.mode == "ftag":
             self.generator = PET_generator(
-                input_dim,
-                hidden_size,
+                input_dim
+                if num_gen_classes == 1
+                else num_gen_classes,  # diffusion or segmentation
+                base_dim,
                 num_transformers=num_transformers_head,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
@@ -101,7 +107,9 @@ class PET2(nn.Module):
                 num_tokens=num_tokens,
                 num_add=self.num_add,
                 num_classes=num_classes,
+                skip_pid = num_classes == 1
             )
+
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -115,10 +123,11 @@ class PET2(nn.Module):
 
     def no_weight_decay(self):
         # Specify parameters that should not be decayed
-        return {"norm", "scale", "token"}
+        return {"norm", "token"}
 
     def forward(self, x, y, cond=None, pid=None, add_info=None):
-        y_pred, y_perturb, z_pred, v, x_body, z_body = (
+        y_pred, y_perturb, z_pred, v, v_weight, x_body, z_body = (
+            None,
             None,
             None,
             None,
@@ -126,25 +135,30 @@ class PET2(nn.Module):
             None,
             None,
         )
+        
         time = torch.rand(size=(x.shape[0],)).to(x.device)
         _, alpha, sigma = get_logsnr_alpha_sigma(time)
 
         if self.mode == "generator" or self.mode == "pretrain":
-            z, v = perturb(x, time)
+            z, v, v_weight = perturb(x, time)
             z_body = self.body(z, cond, pid, add_info, time)
             z_pred = self.generator(z_body, y)
 
-        if self.mode == "classifier" or self.mode == "pretrain":
+
+        if self.mode == "classifier" or self.mode == "pretrain" or self.mode == "ftag":
             x_body = self.body(x, cond, pid, add_info, torch.zeros_like(time))
             y_pred = self.classifier(x_body)
             if self.mode == "pretrain":
                 y_perturb = self.classifier(z_body)
+            if self.mode == "ftag":
+                z_pred = self.generator(x_body, y)
 
         return {
             "y_pred": y_pred,
             "y_perturb": y_perturb,
             "z_pred": z_pred,
             "v": v,
+            "v_weight": v_weight,
             "x_body": x_body,
             "z_body": z_body,
             "alpha": alpha**2,
@@ -154,7 +168,7 @@ class PET2(nn.Module):
 class PET_classifier(nn.Module):
     def __init__(
         self,
-        hidden_size,
+        base_dim,
         num_transformers=2,
         num_heads=4,
         mlp_ratio=2,
@@ -171,7 +185,7 @@ class PET_classifier(nn.Module):
         self.in_blocks = nn.ModuleList(
             [
                 TokenAttBlock(
-                    dim=hidden_size,
+                    dim=base_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                     attn_drop=attn_drop,
@@ -186,14 +200,14 @@ class PET_classifier(nn.Module):
         )
 
         self.fc = MLP(
-            hidden_size * self.num_tokens,
-            int(mlp_ratio * self.num_tokens * hidden_size),
+            base_dim * self.num_tokens,
+            int(mlp_ratio * self.num_tokens * base_dim),
             act_layer=act_layer,
             drop=mlp_drop,
             norm_layer=norm_layer,
         )
 
-        self.out = nn.Linear(self.num_tokens * hidden_size, num_classes)
+        self.out = nn.Linear(self.num_tokens * base_dim, num_classes)
 
         self.initialize_weights()
 
@@ -207,7 +221,7 @@ class PET_classifier(nn.Module):
 
     def forward(self, x):
         B = x.shape[0]
-        mask = x[:, self.num_tokens :, 3:4] != 0
+        mask = x[:, self.num_tokens :, 2:3] != 0
         for ib, blk in enumerate(self.in_blocks):
             x = blk(x, mask=mask)
 
@@ -219,7 +233,7 @@ class PET_generator(nn.Module):
     def __init__(
         self,
         output_size,
-        hidden_size,
+        base_dim,
         num_transformers=2,
         num_heads=4,
         mlp_ratio=2,
@@ -230,26 +244,32 @@ class PET_generator(nn.Module):
         num_tokens=4,
         num_add=1,
         num_classes=2,
+        skip_pid = False,
     ):
         super().__init__()
         self.num_tokens = num_tokens
         self.num_add = num_add
         self.num_classes = num_classes
+        self.skip_pid = skip_pid
 
-        self.pid_embed = nn.Sequential(
-            nn.Embedding(num_classes, hidden_size),
-            MLP(
-                hidden_size,
-                int(mlp_ratio * hidden_size),
-                act_layer=act_layer,
-                drop=mlp_drop,
-            ),
-        )
+
+        if not self.skip_pid:
+            self.pid_embed = nn.Sequential(                
+                nn.Embedding(num_classes, base_dim),
+                MLP(
+                    base_dim,
+                    int(mlp_ratio * base_dim),
+                    out_features=base_dim,
+                    act_layer=act_layer,
+                    drop=mlp_drop,
+                ),
+            )
+            self.num_add = self.num_add + 1
 
         self.in_blocks = nn.ModuleList(
             [
                 AttBlock(
-                    dim=hidden_size,
+                    dim=base_dim,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                     attn_drop=attn_drop,
@@ -266,14 +286,14 @@ class PET_generator(nn.Module):
 
         self.fc = nn.Sequential(
             MLP(
-                hidden_size,
-                int(mlp_ratio * hidden_size),
+                base_dim,
+                int(mlp_ratio * base_dim),
                 act_layer=act_layer,
                 drop=mlp_drop,
             ),
         )
 
-        self.out = nn.Linear(hidden_size, output_size)
+        self.out = nn.Linear(base_dim, output_size)
 
         self.initialize_weights()
 
@@ -285,27 +305,28 @@ class PET_generator(nn.Module):
 
         self.apply(_init_weights)
 
-    def forward(self, x, y):
+    def forward(self, x, y=None):
         # Add tokens and label embedding
-        mask = x[:, :, 3:4] != 0
-        mask = torch.cat([torch.ones_like(mask[:, :1]), mask], 1)
-        x = torch.cat([self.pid_embed(y).unsqueeze(1), x], 1) * mask
+        mask = x[:, :, 2:3] != 0
 
+        if not self.skip_pid and y is not None:
+            mask = torch.cat([torch.ones_like(mask[:, :1]), mask], 1)
+            x = torch.cat([self.pid_embed(y).unsqueeze(1), x], 1) * mask
+            
         for ib, blk in enumerate(self.in_blocks):
             x = blk(x, mask=mask)
-
         x = (
-            self.fc(x[:, self.num_add + self.num_tokens + 1 :])
-            * mask[:, self.num_add + self.num_tokens + 1 :]
+            self.fc(x[:, self.num_add + self.num_tokens :])
+            * mask[:, self.num_add + self.num_tokens :]
         )
-        return self.out(x) * mask[:, self.num_add + self.num_tokens + 1 :]
+        return self.out(x) * mask[:, self.num_add + self.num_tokens :]
 
 
 class PET_body(nn.Module):
     def __init__(
         self,
         input_dim,
-        hidden_size,
+        base_dim,
         num_transformers=2,
         num_transf_local=2,
         num_heads=4,
@@ -325,6 +346,7 @@ class PET_body(nn.Module):
         add_info=False,
         add_dim=4,
         use_time=False,
+        skip=False,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -333,18 +355,18 @@ class PET_body(nn.Module):
         self.conditional = conditional
         self.pid = pid
         self.add_info = add_info
-
+        self.skip = skip
         self.embed = InputBlock(
             in_features=input_dim,
-            hidden_features=int(mlp_ratio * hidden_size),
-            out_features=hidden_size,
+            hidden_features=int(mlp_ratio * base_dim),
+            out_features=base_dim,
             norm_layer=norm_layer,
             act_layer=act_layer,
         )
 
         if self.use_int:
             self.interaction = InteractionBlock(
-                hidden_features=hidden_size,
+                hidden_features=base_dim,
                 out_features=num_heads,
                 # mlp_drop=mlp_drop,
                 act_layer=act_layer,
@@ -353,15 +375,15 @@ class PET_body(nn.Module):
 
         self.local_physics = LocalEmbeddingBlock(
             in_features=input_dim,
-            hidden_features=mlp_ratio * hidden_size,
-            out_features=hidden_size,
+            hidden_features=mlp_ratio * base_dim,
+            out_features=base_dim,
             act_layer=act_layer,
             mlp_drop=mlp_drop,
             attn_drop=attn_drop,
             norm_layer=norm_layer,
             K=K,
             num_heads=num_heads,
-            physics=True,
+            physics=use_int,
             num_transformers=num_transf_local,
         )
 
@@ -370,8 +392,8 @@ class PET_body(nn.Module):
             self.cond_embed = nn.Sequential(
                 MLP(
                     in_features=cond_dim,
-                    hidden_features=hidden_size,
-                    out_features=hidden_size,
+                    hidden_features=base_dim,
+                    out_features=base_dim,
                     norm_layer=norm_layer,
                     act_layer=act_layer,
                 )
@@ -380,11 +402,11 @@ class PET_body(nn.Module):
 
         if self.use_time:
             # Time embedding module for diffusion timesteps
-            self.MPFourier = MPFourier(hidden_size)
+            self.MPFourier = MPFourier(base_dim)
             self.time_embed = MLP(
-                in_features=hidden_size,
-                hidden_features=int(mlp_ratio * hidden_size),
-                out_features=hidden_size,
+                in_features=base_dim,
+                hidden_features=int(mlp_ratio * base_dim),
+                out_features=base_dim,
                 norm_layer=norm_layer,
                 act_layer=act_layer,
                 bias=False,
@@ -395,8 +417,8 @@ class PET_body(nn.Module):
             self.add_embed = nn.Sequential(
                 MLP(
                     in_features=add_dim,
-                    hidden_features=int(mlp_ratio * hidden_size),
-                    out_features=hidden_size,
+                    hidden_features=int(mlp_ratio * base_dim),
+                    out_features=base_dim,
                     norm_layer=norm_layer,
                     act_layer=act_layer,
                     bias=False,
@@ -407,34 +429,72 @@ class PET_body(nn.Module):
         if self.pid:
             # Will assume PIDs are just a list of integers and use the embedding layer, notice that zero_pid_idx is used to map zero-padded entries
             self.pid_embed = nn.Sequential(
-                nn.Embedding(pid_dim, hidden_size, padding_idx=0),
+                nn.Embedding(pid_dim, base_dim, padding_idx=0),
                 NoScaleDropout(feature_drop),
             )
 
         self.num_tokens = num_tokens
-        self.token = nn.Parameter(1e-3 * torch.ones(1, self.num_tokens, hidden_size))
+        self.token = nn.Parameter(1e-3 * torch.ones(1, self.num_tokens, base_dim))
 
         self.num_heads = num_heads
-        self.in_blocks = nn.ModuleList(
-            [
-                AttBlock(
-                    dim=hidden_size,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    attn_drop=attn_drop,
-                    mlp_drop=mlp_drop,
-                    act_layer=act_layer,
-                    # act_layer=nn.LeakyReLU,
-                    norm_layer=norm_layer,
-                    num_tokens=num_tokens + self.num_add,
-                    skip=False,
-                    use_int=use_int,
-                )
-                for _ in range(num_transformers)
-            ]
-        )
 
-        self.norm = norm_layer(hidden_size)
+        if self.skip:
+            self.in_blocks = nn.ModuleList(
+                [
+                    AttBlock(
+                        dim=base_dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        attn_drop=attn_drop,
+                        mlp_drop=mlp_drop,
+                        act_layer=act_layer,
+                        norm_layer=norm_layer,
+                        num_tokens=num_tokens + self.num_add,
+                        skip=False,
+                        use_int=use_int,
+                    )
+                    for _ in range(num_transformers // 2)
+                ]
+            )
+
+            self.out_blocks = nn.ModuleList(
+                [
+                    AttBlock(
+                        dim=base_dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        attn_drop=attn_drop,
+                        mlp_drop=mlp_drop,
+                        act_layer=act_layer,
+                        norm_layer=norm_layer,
+                        num_tokens=num_tokens + self.num_add,
+                        skip=True,
+                        use_int=use_int,
+                    )
+                    for _ in range(num_transformers // 2)
+                ]
+            )
+
+        else:
+            self.in_blocks = nn.ModuleList(
+                [
+                    AttBlock(
+                        dim=base_dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        attn_drop=attn_drop,
+                        mlp_drop=mlp_drop,
+                        act_layer=act_layer,
+                        norm_layer=norm_layer,
+                        num_tokens=num_tokens + self.num_add,
+                        skip=False,
+                        use_int=use_int,
+                    )
+                    for _ in range(num_transformers)
+                ]
+            )
+
+        self.norm = norm_layer(base_dim)
 
         self.initialize_weights()
 
@@ -450,7 +510,7 @@ class PET_body(nn.Module):
 
     def forward(self, x, cond=None, pid=None, add_info=None, time=None):
         B = x.shape[0]
-        mask = x[:, :, 3:4] != 0
+        mask = x[:, :, 2:3] != 0
         token = self.token.expand(B, -1, -1)
 
         x_embed, x = self.embed(x, mask)
@@ -459,6 +519,7 @@ class PET_body(nn.Module):
         coord_shift = 999.0 * (~mask).float()
         local_features, indices = self.local_physics(coord_shift + x[:, :, :2], x, mask)
 
+        x_int = None
         if self.use_int:
             x_int = self.interaction(x, mask)
 
@@ -483,7 +544,7 @@ class PET_body(nn.Module):
         x = torch.cat([token, x], 1)
 
         # Create a new mask based on the updated point cloud with additional tokens
-        mask = x[:, :, 3:4] != 0
+        mask = x[:, :, 2:3] != 0
 
         attn_mask = mask.float() @ mask.float().transpose(-1, -2)
         attn_mask = ~(attn_mask.bool()).repeat_interleave(self.num_heads, dim=0)
@@ -502,8 +563,83 @@ class PET_body(nn.Module):
                 ]
             )
 
+        skips = []
         for ib, blk in enumerate(self.in_blocks):
             x = blk(x, mask=mask, attn_mask=attn_mask)
+            skips.append(x)
+        if self.skip:
+            for ib, blk in enumerate(self.out_blocks):
+                x = blk(x, mask=mask, attn_mask=attn_mask, skip=skips.pop())
 
         x = self.norm(x) * mask
         return x
+
+
+
+
+class MLPGEN(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        base_dim,
+        mlp_ratio=2,
+        norm_layer=DynamicTanh,
+        act_layer=nn.GELU,
+        num_layers = 3,
+        mlp_drop=0.0,
+        conditional=False,
+        cond_dim=1,
+    ):
+        super().__init__()
+        self.embed = MLP(
+            in_features=input_dim,
+            hidden_features=int(mlp_ratio * base_dim),
+            out_features=base_dim//2,
+            norm_layer=norm_layer,
+            act_layer=act_layer,
+        )
+
+        self.cond = MLP(
+            in_features=cond_dim,
+            hidden_features=int(mlp_ratio * base_dim),
+            out_features=base_dim//2,
+            norm_layer=norm_layer,
+            act_layer=act_layer,
+        )
+        
+        self.in_blocks = nn.ModuleList(
+            [
+                MLP(
+                    in_features=base_dim,
+                    hidden_features=int(mlp_ratio * base_dim),
+                    out_features=base_dim,
+                    norm_layer=norm_layer,
+                    act_layer=act_layer,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+
+
+        # Time embedding module for diffusion timesteps
+        self.MPFourier = MPFourier(base_dim)
+        self.time_embed = MLP(
+            in_features=base_dim,
+            hidden_features=int(mlp_ratio * base_dim),
+            out_features=base_dim//2,
+            act_layer=act_layer,
+        )
+
+        self.out = nn.Linear(base_dim, input_dim)
+
+    def forward(self, z, time, cond=None):
+        z = self.embed(z)
+        z = z + self.cond(cond)
+        z = torch.cat([self.time_embed(self.MPFourier(time)), z], 1)
+        for ib, blk in enumerate(self.in_blocks):
+            z = blk(z)
+        z = self.out(z)
+        return z
+
+
+    
