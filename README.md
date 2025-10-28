@@ -7,7 +7,7 @@ This repository contains the software package necessary to reproduce all the res
 - [Data](#data)
 - [Training](#training)
 - [Evaluation](#evaluation)
-- [Using the Pre-trained checkpoint](using-the-pre-trained-checkpoint)
+- [Using the Pre-trained checkpoint](#using-the-pre-trained-checkpoint)
 
 
 ## Installation
@@ -28,7 +28,7 @@ omnilearned dataloader -d DATASET -f OUTPUT/PATH
 Datasets available from the package are: top, qg, aspen, atlas, jetclass, jetclass2, h1, jetnet150, jetnet30, cms_qcd, cms_bsm, atlas_flav
 
 
-If ```--d pretrain``` is used instead, aspen, atlas, jetclass, jetclass2, cms_qcd, cms_bsm, and h1 datasets will be downloaded. The total size of the pretrain dataset is around 4T so be sure to have enough space available!
+If ```--dataset pretrain``` is used instead, aspen, atlas, jetclass, jetclass2, cms_qcd, cms_bsm, and h1 datasets will be downloaded. The total size of the pretrain dataset is around 4T so be sure to have enough space available!
 
 These datasets are open and available from elsewhere, please cite the following resources depending on the dataset used:
 

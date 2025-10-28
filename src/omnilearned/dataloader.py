@@ -41,7 +41,7 @@ def collate_point_cloud(batch, max_part=150):
     # max_particles = point_clouds.shape[1]
 
     # Truncate point clouds
-    truncated_X = point_clouds[:, :max_particles, :]  # (B, M, F)
+    truncated_X = point_clouds[:, :max_particles, :].contiguous()  # (B, M, F)
     result = {"X": truncated_X, "y": labels}
 
     # Handle optional fields in a loop to reduce code duplication
@@ -51,7 +51,7 @@ def collate_point_cloud(batch, max_part=150):
             stacked = torch.stack([item[field] for item in batch])
             # Truncate if it's sequence-like (i.e., has 2 or more dims)
             if stacked.dim() >= 2 and stacked.shape[1] >= max_particles:
-                stacked = stacked[:, :max_particles]
+                stacked = stacked[:, :max_particles].contiguous()
             result[field] = stacked
         else:
             result[field] = None
