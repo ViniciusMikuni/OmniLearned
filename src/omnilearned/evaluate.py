@@ -9,7 +9,7 @@ from omnilearned.utils import (
     get_checkpoint_name,
     restore_checkpoint,
     pad_array,
-    get_model_parameters
+    get_model_parameters,
 )
 from omnilearned.diffusion import generate
 import os
@@ -32,12 +32,11 @@ def eval_model(
     save_tag="pretrain",
     rank=0,
 ):
-
     prediction, cond, labels = test_step(model, test_loader, mode, device)
     if mode == "classifier":
         if use_event_loss:
             np.savez(
-                os.path.join(outdir,f"outputs_{save_tag}_{dataset}_{rank}.npz"),
+                os.path.join(outdir, f"outputs_{save_tag}_{dataset}_{rank}.npz"),
                 prediction=prediction[:, :200].softmax(-1).cpu().numpy(),
                 event_prediction=prediction[:, 200:].softmax(-1).cpu().numpy(),
                 pid=labels.cpu().numpy(),
@@ -45,20 +44,19 @@ def eval_model(
             )
         else:
             np.savez(
-                os.path.join(outdir,f"outputs_{save_tag}_{dataset}_{rank}.npz"),
+                os.path.join(outdir, f"outputs_{save_tag}_{dataset}_{rank}.npz"),
                 prediction=prediction.softmax(-1).cpu().numpy(),
                 pid=labels.cpu().numpy(),
                 cond=cond.cpu().numpy() if cond is not None else [],
             )
     else:
         with h5py.File(
-                os.path.join(outdir,f"generated_{save_tag}_{dataset}_{rank}.h5"),
+            os.path.join(outdir, f"generated_{save_tag}_{dataset}_{rank}.h5"),
             "w",
         ) as fh5:
             fh5.create_dataset("data", data=prediction.cpu().numpy())
             fh5.create_dataset("global", data=cond.cpu().numpy())
             fh5.create_dataset("pid", data=labels.cpu().numpy() + 1)
-
 
 
 def test_step(
@@ -94,7 +92,7 @@ def test_step(
                 assert "cond" in model_kwargs, (
                     "ERROR, conditioning variables not passed to model"
                 )
-                preds.append(generate(model,y, X.shape, **model_kwargs))
+                preds.append(generate(model, y, X.shape, **model_kwargs))
         labels.append(y)
         conds.append(batch["cond"])
         if mode == "generator":
@@ -141,7 +139,7 @@ def run(
     local_rank, rank, size = ddp_setup()
 
     model_params = get_model_parameters(model_size)
-    
+
     # set up model
     model = PET2(
         input_dim=num_feat,
@@ -153,10 +151,9 @@ def run(
         add_dim=num_add,
         mode=mode,
         num_classes=num_classes,
-        **model_params
+        **model_params,
     )
-    
-    
+
     if rank == 0:
         d = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         print("**** Setup ****")
@@ -188,7 +185,7 @@ def run(
         print("**** Setup ****")
         print(f"Train dataset len: {len(test_loader)}")
         print("************")
-        
+
     if os.path.isfile(os.path.join(indir, get_checkpoint_name(save_tag))):
         if is_master_node():
             print(
@@ -201,7 +198,7 @@ def run(
             get_checkpoint_name(save_tag),
             local_rank,
             is_main_node=is_master_node(),
-            restore_ema_model = mode == 'generator',
+            restore_ema_model=mode == "generator",
         )
 
     else:

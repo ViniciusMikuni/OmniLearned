@@ -48,7 +48,7 @@ def train(
         False,
         help="Load the model with additional blocks but zero the inputs from the dataloader",
     ),
-    use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),    
+    use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
     use_event_loss: bool = typer.Option(
         False, help="Use additional classification loss between physics process"
     ),
@@ -129,6 +129,7 @@ def train(
         num_workers,
         clip_inputs=clip_inputs,
     )
+
 
 @app.command()
 def train_hl(
@@ -253,7 +254,6 @@ def evaluate(
     )
 
 
-
 @app.command()
 def evaluate_hl(
     # General Options
@@ -286,7 +286,6 @@ def evaluate_hl(
         num_workers,
     )
 
-    
 
 @app.command()
 def dataloader(

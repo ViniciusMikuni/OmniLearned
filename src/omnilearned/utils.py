@@ -10,38 +10,40 @@ from torch.distributed import init_process_group, get_rank
 import torch.nn.functional as F
 import requests
 
+
 def get_model_parameters(model_size):
     model_dict = {}
     if model_size == "small":
-        model_dict['num_transformers'] = 8
-        model_dict['num_transformers_head'] = 2
-        model_dict['num_tokens'] = 4
-        model_dict['num_heads'] = 8
-        model_dict['K'] = 10
-        model_dict['base_dim'] = 128
-        model_dict['mlp_ratio'] = 2
+        model_dict["num_transformers"] = 8
+        model_dict["num_transformers_head"] = 2
+        model_dict["num_tokens"] = 4
+        model_dict["num_heads"] = 8
+        model_dict["K"] = 10
+        model_dict["base_dim"] = 128
+        model_dict["mlp_ratio"] = 2
 
     elif model_size == "medium":
-        model_dict['num_transformers'] = 12
-        model_dict['num_transformers_head'] = 2
-        model_dict['num_tokens'] = 4
-        model_dict['num_heads'] = 16
-        model_dict['K'] = 10
-        model_dict['base_dim'] = 512
-        model_dict['mlp_ratio'] = 2
+        model_dict["num_transformers"] = 12
+        model_dict["num_transformers_head"] = 2
+        model_dict["num_tokens"] = 4
+        model_dict["num_heads"] = 16
+        model_dict["K"] = 10
+        model_dict["base_dim"] = 512
+        model_dict["mlp_ratio"] = 2
 
     elif model_size == "large":
-        model_dict['num_transformers'] = 28
-        model_dict['num_transformers_head'] = 4
-        model_dict['num_tokens'] = 4
-        model_dict['num_heads'] = 32
-        model_dict['K'] = 10
-        model_dict['base_dim'] = 1024
-        model_dict['mlp_ratio'] = 2
+        model_dict["num_transformers"] = 28
+        model_dict["num_transformers_head"] = 4
+        model_dict["num_tokens"] = 4
+        model_dict["num_heads"] = 32
+        model_dict["K"] = 10
+        model_dict["base_dim"] = 1024
+        model_dict["mlp_ratio"] = 2
     else:
         raise ValueError(f"Invalid model size: {model_size}")
 
     return model_dict
+
 
 def print_metrics(y_preds_np, y_np, thresholds=[0.3, 0.5], background_class=0):
     # Compute multiclass AUC
@@ -82,7 +84,7 @@ def print_metrics(y_preds_np, y_np, thresholds=[0.3, 0.5], background_class=0):
                 )
             )
 
-    
+
 class CLIPLoss(nn.Module):
     # From AstroCLIP: https://github.com/PolymathicAI/AstroCLIP/blob/main/astroclip/models/astroclip.py#L117
     def get_logits(
@@ -139,6 +141,7 @@ def sum_reduce(num, device):
     dist.all_reduce(rt, op=dist.ReduceOp.SUM)
     return rt
 
+
 def pad_array(tensor_list, M: int = 150) -> torch.Tensor:
     """
     Given a list of torch tensors, each of shape (B, N_i, F),
@@ -176,7 +179,6 @@ def pad_array(tensor_list, M: int = 150) -> torch.Tensor:
         idx += B
 
     return out
-
 
 
 def get_class_loss(weight, pred, y, class_cost, use_event_loss=False, logs={}):
@@ -223,7 +225,7 @@ def get_loss(
         weights = class_weights[y]
         weights = weights / weights.mean()
 
-        #weights = torch.ones_like(y).float()        
+        # weights = torch.ones_like(y).float()
         loss_class = get_class_loss(
             weights, outputs["y_pred"], y, class_cost, use_event_loss, logs
         )
@@ -245,10 +247,9 @@ def get_loss(
             loss_gen = outputs["v_weight"] * gen_cost(outputs["v"], outputs["z_pred"])
             loss_gen = loss_gen.sum((1, 2)) / nonzero
             loss_gen = loss_gen.mean()
-            
+
         logs["loss_gen"] += loss_gen.detach()
         loss = loss + loss_gen
-
 
     if outputs["y_perturb"] is not None and data_pid is None:
         counts = torch.bincount(y, minlength=outputs["y_pred"].shape[-1]).float()
@@ -308,17 +309,18 @@ def save_checkpoint(
         f"Epoch {epoch} | Training checkpoint saved at {os.path.join(checkpoint_dir, checkpoint_name)}"
     )
 
+
 def restore_checkpoint(
     model,
     checkpoint_dir,
     checkpoint_name,
     device,
     is_main_node=False,
-    restore_ema_model = False,
+    restore_ema_model=False,
     ema_model=None,
     fine_tune=False,
-    optimizer = None,
-    lr_scheduler = None,
+    optimizer=None,
+    lr_scheduler=None,
 ):
     device = "cuda:{}".format(device) if torch.cuda.is_available() else "cpu"
 
@@ -332,8 +334,7 @@ def restore_checkpoint(
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
         print(f"Downloaded {checkpoint_name}")
-        
-    
+
     checkpoint = torch.load(
         os.path.join(checkpoint_dir, checkpoint_name),
         map_location=device,
@@ -366,16 +367,17 @@ def restore_checkpoint(
             lr_scheduler.load_state_dict(checkpoint["sched"])
         startEpoch = checkpoint["epoch"] + 1
         best_loss = checkpoint["loss"]
-        
+
     else:
-        def filter_partial_model(state,model_state,is_main_node=False):
+
+        def filter_partial_model(state, model_state, is_main_node=False):
             filtered_state = {}
             for k, v in state.items():
                 if "out." in k:
                     if is_main_node:
                         print(f"Skipping {k}: explicitly excluded from loading")
                     continue
-                
+
                 if k in model_state and model_state[k].shape == v.shape:
                     filtered_state[k] = v
                 else:
@@ -384,24 +386,27 @@ def restore_checkpoint(
                             f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
                         )
             return filtered_state
-            
-        
+
         if base_model.body is not None and "body" in checkpoint:
-            filtered_state = filter_partial_model(checkpoint["body"],
-                                                  base_model.body.state_dict(),
-                                                  is_main_node)
+            filtered_state = filter_partial_model(
+                checkpoint["body"], base_model.body.state_dict(), is_main_node
+            )
             base_model.body.load_state_dict(filtered_state, strict=False)
 
         if base_model.classifier is not None and "classifier_head" in checkpoint:
-            filtered_state = filter_partial_model(checkpoint["classifier_head"],
-                                                  base_model.classifier.state_dict(),
-                                                  is_main_node)
+            filtered_state = filter_partial_model(
+                checkpoint["classifier_head"],
+                base_model.classifier.state_dict(),
+                is_main_node,
+            )
             base_model.classifier.load_state_dict(filtered_state, strict=False)
 
         if base_model.generator is not None:
-            filtered_state = filter_partial_model(checkpoint["generator_head"],
-                                                  base_model.generator.state_dict(),
-                                                  is_main_node)
+            filtered_state = filter_partial_model(
+                checkpoint["generator_head"],
+                base_model.generator.state_dict(),
+                is_main_node,
+            )
             base_model.generator.load_state_dict(filtered_state, strict=False)
 
         startEpoch = 0.0
@@ -414,7 +419,9 @@ def restore_checkpoint(
             ema_model.body.load_state_dict(checkpoint["ema_body"], strict=True)
 
             if base_model.generator is not None:
-                ema_model.generator.load_state_dict(checkpoint["ema_generator"], strict=True)
+                ema_model.generator.load_state_dict(
+                    checkpoint["ema_generator"], strict=True
+                )
 
     if optimizer is not None:
         try:
@@ -424,7 +431,6 @@ def restore_checkpoint(
                 print("Optimizer cannot be loaded back, skipping...")
 
     return startEpoch, best_loss
-
 
 
 def shadow_copy(model):
@@ -496,9 +502,14 @@ def get_param_groups(model, wd, lr, lr_factor=1.0, fine_tune=False, freeze=False
         )
 
     if fine_tune and freeze:
-        #Freeze body parts but input embeddings
+        # Freeze body parts but input embeddings
         for name, param in model.body.named_parameters():
-            if name.startswith("embed.") or name.startswith("local_physics.") or name.startswith("cond.") or name.startswith("add_embed."):
+            if (
+                name.startswith("embed.")
+                or name.startswith("local_physics.")
+                or name.startswith("cond.")
+                or name.startswith("add_embed.")
+            ):
                 continue
             else:
                 param.requires_grad = False

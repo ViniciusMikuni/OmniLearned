@@ -17,6 +17,7 @@ class MPFourier(nn.Module):
         y = y.cos() * np.sqrt(2)
         return x.unsqueeze(-1) * y.to(x.dtype)
 
+
 def get_logsnr_alpha_sigma(time, shift=1.0):
     alpha = (1.0 - time)[:, None, None]
     sigma = time[:, None, None]
@@ -25,10 +26,7 @@ def get_logsnr_alpha_sigma(time, shift=1.0):
 
 
 def get_ad_eps(x, mask):
-    means = torch.tensor(
-        [0.0, 0.0, 1.11398, 1.43384],
-        device=x.device
-    )
+    means = torch.tensor([0.0, 0.0, 1.11398, 1.43384], device=x.device)
     stds = torch.tensor(
         [0.270949, 0.27426, 1.30273, 1.33559],
         device=x.device,
@@ -40,11 +38,9 @@ def get_ad_eps(x, mask):
 
     return eps * mask
 
+
 def get_ad_eps_hl(x):
-    means = torch.tensor(
-        [6.40028, 5.0057, 0.6861],
-        device=x.device
-    )
+    means = torch.tensor([6.40028, 5.0057, 0.6861], device=x.device)
     stds = torch.tensor(
         [0.16999, 0.318289, 0.193016],
         device=x.device,
@@ -67,12 +63,11 @@ def perturb(x, time):
 
 def perturb_hl(x, time):
     eps = get_ad_eps_hl(x)
-    alpha = 1.0 - time[:,None]
-    sigma = time[:,None]        
+    alpha = 1.0 - time[:, None]
+    sigma = time[:, None]
     z = alpha * x + sigma * eps
 
     return z, eps - x, torch.ones_like(x)
-
 
 
 def network_wrapper(model, z, condition, pid, add_info, y, time):
@@ -94,7 +89,6 @@ def generate(
         torch.arange(max_part).to(device), (nparts.shape[0], 1)
     ) < torch.tile(nparts, (1, max_part))
 
-
     x_0 = get_ad_eps(x, mask.float().unsqueeze(-1))
 
     def ode_wrapper(t, x_t):
@@ -111,18 +105,16 @@ def generate(
     )
     return x_t[-1]
 
-def generate_hl(
-    model, shape, cond=None, nsteps=512, device="cuda"
-) -> torch.Tensor:
-    
+
+def generate_hl(model, shape, cond=None, nsteps=512, device="cuda") -> torch.Tensor:
     x = torch.randn(*shape).to(device)  # x_T ~ N(0, 1)
     nsample = x.shape[0]
-    
+
     x_0 = get_ad_eps_hl(x)
 
     def ode_wrapper(t, x_t):
         time = t * torch.ones((nsample,)).to(device)
-        v = model(x_t,time,cond)
+        v = model(x_t, time, cond)
         return v
 
     x_t = odeint(

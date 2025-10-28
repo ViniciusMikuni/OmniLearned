@@ -38,7 +38,7 @@ def collate_point_cloud(batch, max_part=150):
     # Use validity mask based on feature index 2
     valid_mask = point_clouds[:, :, 2] != 0
     max_particles = min(valid_mask.sum(dim=1).max().item(), max_part)
-    #max_particles = point_clouds.shape[1]
+    # max_particles = point_clouds.shape[1]
 
     # Truncate point clouds
     truncated_X = point_clouds[:, :max_particles, :]  # (B, M, F)
@@ -65,7 +65,9 @@ def get_url(dataset_name, dataset_type, base_url="https://portal.nersc.gov/cfs/m
         requests.head(url, allow_redirects=True, timeout=5)
         return url
     except requests.RequestException:
-        print("ERROR: Request timed out, visit https://www.nersc.gov/users/status for status on  portal.nersc.gov")
+        print(
+            "ERROR: Request timed out, visit https://www.nersc.gov/users/status for status on  portal.nersc.gov"
+        )
         return None
 
 
@@ -155,7 +157,9 @@ class HEPDataset(Dataset):
             mask_part = (torch.hypot(sample["X"][:, 0], sample["X"][:, 1]) < 0.8) & (
                 sample["X"][:, 2] > 0.0
             )
-            sample["X"][:, 3] = np.clip(sample["X"][:, 3], a_min=sample["X"][:, 2],a_max=None)
+            sample["X"][:, 3] = np.clip(
+                sample["X"][:, 3], a_min=sample["X"][:, 2], a_max=None
+            )
             sample["X"] = sample["X"] * mask_part.unsqueeze(-1).float()
 
         label = f["pid"][sample_idx]
@@ -205,7 +209,7 @@ def load_data(
     size=1,
     clip_inputs=False,
     ftag=False,  # special flag for atlas ftag
-    shuffle = True
+    shuffle=True,
 ):
     supported_datasets = [
         "top",
@@ -266,7 +270,13 @@ def load_data(
             if shuffle:
                 indices = np.load(index_file, mmap_mode="r")[rank::size]
             else:
-                indices = np.load(index_file, mmap_mode="r")[len(np.load(index_file, mmap_mode="r")) * rank // size : len(np.load(index_file, mmap_mode="r")) * (rank + 1) // size]   
+                indices = np.load(index_file, mmap_mode="r")[
+                    len(np.load(index_file, mmap_mode="r")) * rank // size : len(
+                        np.load(index_file, mmap_mode="r")
+                    )
+                    * (rank + 1)
+                    // size
+                ]
             file_indices.extend(
                 (file_idx + index_shift, sample_idx) for file_idx, sample_idx in indices
             )

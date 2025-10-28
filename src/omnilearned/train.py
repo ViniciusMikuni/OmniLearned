@@ -19,7 +19,7 @@ from omnilearned.utils import (
     get_loss,
     save_checkpoint,
     restore_checkpoint,
-    get_model_parameters
+    get_model_parameters,
 )
 
 import time
@@ -39,7 +39,7 @@ def get_logs(device):
     logs["loss_clip"] = logs_buff[3].view(-1)
     logs["loss_class_event"] = logs_buff[4].view(-1)
     return logs
-    
+
 
 def train_step(
     model,
@@ -61,7 +61,7 @@ def train_step(
     model.train()
 
     logs = get_logs(device)
-    
+
     if iterations_per_epoch < 0:
         iterations_per_epoch = len(dataloader)
 
@@ -76,20 +76,19 @@ def train_step(
 
         # for batch_idx, batch in enumerate(dataloader):
         optimizer.zero_grad()  # Zero the gradients
-        
+
         X, y = batch["X"].to(device, dtype=torch.float), batch["y"].to(device)
-        
+
         model_kwargs = {
             key: (batch[key].to(device) if batch[key] is not None else None)
             for key in ["cond", "pid", "add_info"]
             if key in batch
         }
-        
+
         if batch.get("data_pid") is not None:
             data_pid = batch["data_pid"].to(device)
         else:
             data_pid = None
-
 
         with amp.autocast(
             "cuda:{}".format(device) if torch.cuda.is_available() else "cpu",
@@ -325,8 +324,6 @@ def train_model(
         json.dump(losses, open(f"{output_dir}/training_{save_tag}.json", "w"))
 
 
-
-
 def run(
     outdir: str = "",
     save_tag: str = "",
@@ -374,7 +371,6 @@ def run(
 
     model_params = get_model_parameters(model_size)
 
-
     # set up model
     model = PET2(
         input_dim=num_feat,
@@ -390,7 +386,7 @@ def run(
         num_gen_classes=num_gen_classes,
         mlp_drop=mlp_drop,
         attn_drop=attn_drop,
-        feature_drop=feature_drop,    
+        feature_drop=feature_drop,
         **model_params,
     )
 
@@ -439,7 +435,6 @@ def run(
         num_workers=num_workers,
         rank=rank,
         size=size,
-
         clip_inputs=clip_inputs,
         ftag=mode == "ftag",
     )
@@ -464,15 +459,14 @@ def run(
 
     train_steps = len(train_loader) if iterations < 0 else iterations
 
-
-    if sched == 'onecycle':
+    if sched == "onecycle":
         lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer=optimizer,
             total_steps=(train_steps * epoch),
             max_lr=lr,
-            pct_start = 0.1,
+            pct_start=0.1,
         )
-    elif sched == 'cosine':
+    elif sched == "cosine":
         lr_scheduler = get_cosine_schedule_with_warmup(
             optimizer=optimizer,
             num_warmup_steps=train_steps * warmup_epoch,
@@ -515,7 +509,7 @@ def run(
                 f"Will fine-tune using checkpoint {os.path.join(outdir, get_checkpoint_name(pretrain_tag))}"
             )
         checkpoint_name = get_checkpoint_name(pretrain_tag)
-        
+
     if checkpoint_name is not None:
         epoch_init, loss_init = restore_checkpoint(
             model,
@@ -524,11 +518,10 @@ def run(
             local_rank,
             is_main_node=is_master_node(),
             ema_model=ema_model,
-            optimizer = optimizer,
-            lr_scheduler = lr_scheduler,
-            fine_tune = fine_tune
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            fine_tune=fine_tune,
         )
-
 
     if wandb:
         import wandb

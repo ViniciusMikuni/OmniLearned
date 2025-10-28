@@ -164,7 +164,7 @@ class InteractionBlock(nn.Module):
         # reshape to [B*H, M, M]
         out = einops.rearrange(out, "b n1 n2 h -> (b h) n1 n2")
         # bias = out.reshape(-1, M, M)
-        
+
         return out
 
 

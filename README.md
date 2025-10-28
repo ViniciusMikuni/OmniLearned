@@ -5,7 +5,10 @@ This repository contains the software package necessary to reproduce all the res
 ## Table of Contents
 - [Installation](#installation)
 - [Data](#data)
-- [Data Citations](#citation)
+- [Training](#training)
+- [Evaluation](#evaluation)
+- [Using the Pre-trained checkpoint](using-the-pre-trained-checkpoint)
+
 
 ## Installation
 
@@ -46,8 +49,9 @@ These datasets are open and available from elsewhere, please cite the following 
     pages = "014",
     year = "2019"
 }
+```
 
-</details> ```
+</details> 
 
 
 <details>
@@ -67,8 +71,9 @@ These datasets are open and available from elsewhere, please cite the following 
     pages = "121",
     year = "2019"
 }
+```
 
-</details> ```
+</details> 
 
 <details>
 <summary><b>ATLAS Top Tagging Dataset: Show BibTeX citation</b></summary>
@@ -89,9 +94,9 @@ These datasets are open and available from elsewhere, please cite the following 
     pages = "P08018",
     year = "2024"
 }
+```
 
-
-</details> ```
+</details> 
 
 
 <details>
@@ -113,7 +118,8 @@ These datasets are open and available from elsewhere, please cite the following 
     year = "2021"
 }
 
-</details> ```
+```
+</details>
 
 
 <details>
@@ -131,7 +137,8 @@ These datasets are open and available from elsewhere, please cite the following 
     year = "2021"
 }
 
-</details> ```
+```
+</details>
 
 
 <details>
@@ -150,8 +157,8 @@ These datasets are open and available from elsewhere, please cite the following 
     year = "2025"
 }
 
-
-</details> ```
+```
+</details>
 
 
 <details>
@@ -173,7 +180,8 @@ These datasets are open and available from elsewhere, please cite the following 
     year = "2025"
 }
 
-</details> ```
+```
+</details>
 
 
 <details>
@@ -190,7 +198,8 @@ These datasets are open and available from elsewhere, please cite the following 
     year = "2022"
 }
 
-</details> ```
+```
+</details>
 
 
 <details>
@@ -208,7 +217,8 @@ These datasets are open and available from elsewhere, please cite the following 
     year = "2024"
 }
 
-</details> ```
+```
+</details>
 
 
 
@@ -283,9 +293,6 @@ We also provide trained checkpoints for the medium (m) and large (l) models. The
 ## Creating Your Own Dataset
 
 Instead of using the pre-loaded dataset you can use OmniLearned on your own problem. For this create a folder named ```custom``` where your dataset will be saved. Inside this folder, create the subfolders train/test/val.
-
-Inside each folder
-
 
 
 

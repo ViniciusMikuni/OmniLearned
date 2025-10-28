@@ -22,8 +22,6 @@ import time
 import os
 
 
-
-
 def train_step(
     model,
     dataloader,
@@ -57,16 +55,15 @@ def train_step(
         # for batch_idx, batch in enumerate(dataloader):
         optimizer.zero_grad()  # Zero the gradients
         X = batch["cond"].to(device, dtype=torch.float)
-        c = X[:,1:2]
+        c = X[:, 1:2]
         X = torch.cat((X[:, :1], X[:, 2:]), dim=1)
 
         time = torch.rand(size=(X.shape[0],)).to(X.device)
         z, v, _ = perturb_hl(X, time)
-        z_pred = model(z, time,c)
+        z_pred = model(z, time, c)
         loss = gen_cost(v, z_pred).mean()
         logs["loss"] += loss.detach()
 
-        
         loss.backward()  # Backward pass
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()  # Update parameters
@@ -78,8 +75,6 @@ def train_step(
                     ema_model.parameters(), model.module.parameters()
                 ):
                     ema_p.mul_(ema_decay).add_(model_p, alpha=1.0 - ema_decay)
-
-
 
     if dist.is_initialized():
         for key in logs:
@@ -116,16 +111,16 @@ def val_step(
             batch = next(data_iter)
 
         X = batch["cond"].to(device, dtype=torch.float)
-        c = X[:,1:2]
+        c = X[:, 1:2]
         X = torch.cat((X[:, :1], X[:, 2:]), dim=1)
 
         time = torch.rand(size=(X.shape[0],)).to(X.device)
-        z, v, _ = perturb_hl(X, time)                
+        z, v, _ = perturb_hl(X, time)
 
         with torch.no_grad():
-            z_pred = model(z, time,c)
+            z_pred = model(z, time, c)
             loss = gen_cost(v, z_pred).mean()
-            
+
         logs["loss"] += loss.detach()
 
     if dist.is_initialized():
@@ -285,7 +280,6 @@ def restore_checkpoint(
 
     base_model = model
     base_model.to(device)
-
 
     base_model.load_state_dict(checkpoint["model"], strict=True)
     lr_scheduler.load_state_dict(checkpoint["sched"])

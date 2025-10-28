@@ -28,8 +28,8 @@ class PET2(nn.Module):
         add_dim=4,
         mode="classifier",
         num_classes=2,
-        num_gen_classes=1,            
-        base_dim = 128,
+        num_gen_classes=1,
+        base_dim=128,
         num_transformers=2,
         num_transformers_head=2,
         num_tokens=4,
@@ -69,7 +69,7 @@ class PET2(nn.Module):
             pid_dim=pid_dim,
             add_info=add_info,
             add_dim=add_dim,
-            use_time=self.mode in ['generator','pretrain'],
+            use_time=self.mode in ["generator", "pretrain"],
             skip=skip,
         )
 
@@ -107,7 +107,7 @@ class PET2(nn.Module):
                 num_tokens=num_tokens,
                 num_add=self.num_add,
                 num_classes=num_classes,
-                skip_pid = num_classes == 1
+                skip_pid=num_classes == 1,
             )
 
         self.initialize_weights()
@@ -135,7 +135,7 @@ class PET2(nn.Module):
             None,
             None,
         )
-        
+
         time = torch.rand(size=(x.shape[0],)).to(x.device)
         _, alpha, sigma = get_logsnr_alpha_sigma(time)
 
@@ -143,7 +143,6 @@ class PET2(nn.Module):
             z, v, v_weight = perturb(x, time)
             z_body = self.body(z, cond, pid, add_info, time)
             z_pred = self.generator(z_body, y)
-
 
         if self.mode == "classifier" or self.mode == "pretrain" or self.mode == "ftag":
             x_body = self.body(x, cond, pid, add_info, torch.zeros_like(time))
@@ -244,7 +243,7 @@ class PET_generator(nn.Module):
         num_tokens=4,
         num_add=1,
         num_classes=2,
-        skip_pid = False,
+        skip_pid=False,
     ):
         super().__init__()
         self.num_tokens = num_tokens
@@ -252,9 +251,8 @@ class PET_generator(nn.Module):
         self.num_classes = num_classes
         self.skip_pid = skip_pid
 
-
         if not self.skip_pid:
-            self.pid_embed = nn.Sequential(                
+            self.pid_embed = nn.Sequential(
                 nn.Embedding(num_classes, base_dim),
                 MLP(
                     base_dim,
@@ -312,7 +310,7 @@ class PET_generator(nn.Module):
         if not self.skip_pid and y is not None:
             mask = torch.cat([torch.ones_like(mask[:, :1]), mask], 1)
             x = torch.cat([self.pid_embed(y).unsqueeze(1), x], 1) * mask
-            
+
         for ib, blk in enumerate(self.in_blocks):
             x = blk(x, mask=mask)
         x = (
@@ -575,8 +573,6 @@ class PET_body(nn.Module):
         return x
 
 
-
-
 class MLPGEN(nn.Module):
     def __init__(
         self,
@@ -585,7 +581,7 @@ class MLPGEN(nn.Module):
         mlp_ratio=2,
         norm_layer=DynamicTanh,
         act_layer=nn.GELU,
-        num_layers = 3,
+        num_layers=3,
         mlp_drop=0.0,
         conditional=False,
         cond_dim=1,
@@ -594,7 +590,7 @@ class MLPGEN(nn.Module):
         self.embed = MLP(
             in_features=input_dim,
             hidden_features=int(mlp_ratio * base_dim),
-            out_features=base_dim//2,
+            out_features=base_dim // 2,
             norm_layer=norm_layer,
             act_layer=act_layer,
         )
@@ -602,11 +598,11 @@ class MLPGEN(nn.Module):
         self.cond = MLP(
             in_features=cond_dim,
             hidden_features=int(mlp_ratio * base_dim),
-            out_features=base_dim//2,
+            out_features=base_dim // 2,
             norm_layer=norm_layer,
             act_layer=act_layer,
         )
-        
+
         self.in_blocks = nn.ModuleList(
             [
                 MLP(
@@ -620,13 +616,12 @@ class MLPGEN(nn.Module):
             ]
         )
 
-
         # Time embedding module for diffusion timesteps
         self.MPFourier = MPFourier(base_dim)
         self.time_embed = MLP(
             in_features=base_dim,
             hidden_features=int(mlp_ratio * base_dim),
-            out_features=base_dim//2,
+            out_features=base_dim // 2,
             act_layer=act_layer,
         )
 
@@ -640,6 +635,3 @@ class MLPGEN(nn.Module):
             z = blk(z)
         z = self.out(z)
         return z
-
-
-    
