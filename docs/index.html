@@ -30,7 +30,7 @@
     nav a:hover { text-decoration: underline; }
 
     main {
-      max-width: 1200px;
+      max-width: 1300px;
       margin: auto;
       padding: 3rem 1rem;
     }
@@ -42,7 +42,7 @@
       justify-content: space-between;
       flex-wrap: wrap;
       gap: 3rem;
-      margin-bottom: 5rem;
+      margin-bottom: 6rem;
     }
 
     .intro-text {
@@ -53,71 +53,58 @@
 
     .intro-figure img {
       width: 100%;
-      max-width: 1000px;
+      max-width: 950px;
       border-radius: 16px;
       box-shadow: 0 8px 18px rgba(0,0,0,0.25);
     }
 
-    /* ---- RESULTS CAROUSEL ---- */
+    /* ---- RESULTS ---- */
     .results {
+      margin-top: 3rem;
+    }
+
+    .results h2 {
       text-align: center;
+      margin-bottom: 3rem;
     }
 
-    .carousel {
-      position: relative;
-      overflow: hidden;
-      max-width: 1000px;
-      margin: 2rem auto;
-      border-radius: 16px;
-      box-shadow: 0 8px 18px rgba(0,0,0,0.25);
-    }
-
-    .slide {
+    .result-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
       flex-wrap: wrap;
-      gap: 2rem;
+      gap: 2.5rem;
+      margin: 5rem 0;
       opacity: 0;
-      position: absolute;
-      inset: 0;
-      transition: opacity 1s ease-in-out;
-      background: #fff;
-      padding: 2rem;
+      transform: translateY(80px);
+      transition: all 1.3s ease-out;
     }
 
-    .slide.active { opacity: 1; position: relative; }
+    .result-row.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
 
-    .slide img {
+    .result-row.reverse {
+      flex-direction: row-reverse;
+    }
+
+    .result-image img {
       width: 100%;
-      max-width: 700px;
-      border-radius: 12px;
+      max-width: 950px;
+      border-radius: 14px;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.25);
     }
 
-    .slide-text {
-      flex: 1 1 40%;
+    .result-text {
+      flex: 1 1 45%;
       font-size: 1.1rem;
-      text-align: left;
+      line-height: 1.6;
     }
 
-    .dots {
-      text-align: center;
-      margin-top: 1rem;
-    }
-
-    .dot {
-      height: 12px;
-      width: 12px;
-      margin: 0 5px;
-      background-color: #bbb;
-      border-radius: 50%;
-      display: inline-block;
-      transition: background-color 0.3s;
-      cursor: pointer;
-    }
-
-    .dot.active {
-      background-color: #4a1d59;
+    .result-text h3 {
+      margin-top: 0;
+      color: #4a1d59;
     }
 
     footer {
@@ -129,15 +116,14 @@
     }
 
     /* ---- RESPONSIVE ---- */
-    @media (max-width: 850px) {
-      .intro, .slide {
+    @media (max-width: 900px) {
+      .intro, .result-row, .result-row.reverse {
         flex-direction: column;
         text-align: center;
       }
-      .intro-figure img, .slide img {
+      .intro-figure img, .result-image img {
         max-width: 100%;
       }
-      .slide-text { text-align: center; }
     }
   </style>
 </head>
@@ -172,52 +158,46 @@
     <section class="results">
       <h2>Results Showcase</h2>
 
-      <div class="carousel">
-        <!-- Slide 1 -->
-        <div class="slide active">
+      <div class="result-row">
+        <div class="result-image">
           <img src="plots/top_tagging_rej30.png" alt="Top Tagging">
-          <div class="slide-text">
-            <h3>Jet Tagging Performance</h3>
-            <p>
-              We compare <b>OmniLearned</b> results for the Community Top Tagging
-              Dataset and find that for a fixed signal efficiency, OmniLearned achieves
-              the highest background rejection of all benchmarks!
-            </p>
-          </div>
         </div>
-
-        <!-- Slide 2 -->
-        <div class="slide">
-          <img src="plots/atlas_results.png" alt="ATLAS Flavor Tagging">
-          <div class="slide-text">
-            <h3>ATLAS Flavour Tagging</h3>
-            <p>
-              We also see improvements in flavour tagging using the ATLAS open dataset,
-              consisting of realistic simulations — sometimes improving the background
-              rejection by a factor of two for certain signal efficiencies!
-            </p>
-          </div>
-        </div>
-
-        <!-- Slide 3 -->
-        <div class="slide">
-          <img src="plots/ad_results.png" alt="Anomaly Detection">
-          <div class="slide-text">
-            <h3>Anomaly Detection</h3>
-            <p>
-              Even though top quarks are only 0.1% of the Aspen Open Jets dataset,
-              <b>OmniLearned</b> can still find them — while models trained from
-              scratch cannot!
-            </p>
-          </div>
+        <div class="result-text">
+          <h3>Jet Tagging Performance</h3>
+          <p>
+            We compare <b>OmniLearned</b> results for the Community Top Tagging
+            Dataset and find that for a fixed signal efficiency, OmniLearned achieves
+            the highest background rejection of all benchmarks!
+          </p>
         </div>
       </div>
 
-      <!-- Dots -->
-      <div class="dots">
-        <span class="dot active"></span>
-        <span class="dot"></span>
-        <span class="dot"></span>
+      <div class="result-row reverse">
+        <div class="result-image">
+          <img src="plots/atlas_results.png" alt="ATLAS Flavor Tagging">
+        </div>
+        <div class="result-text">
+          <h3>ATLAS Flavour Tagging</h3>
+          <p>
+            We also see improvements in flavour tagging using the ATLAS open dataset,
+            consisting of realistic simulations — sometimes improving the background
+            rejection by a factor of two for certain signal efficiencies!
+          </p>
+        </div>
+      </div>
+
+      <div class="result-row">
+        <div class="result-image">
+          <img src="plots/ad_results.png" alt="Anomaly Detection">
+        </div>
+        <div class="result-text">
+          <h3>Anomaly Detection</h3>
+          <p>
+            Even though top quarks are only 0.1% of the Aspen Open Jets dataset,
+            <b>OmniLearned</b> can still find them — while models trained from
+            scratch cannot!
+          </p>
+        </div>
       </div>
     </section>
   </main>
@@ -226,30 +206,19 @@
     <p>© 2025 Vinicius Mikuni | KMI Nagoya University</p>
   </footer>
 
-  <!-- ===== CAROUSEL SCRIPT ===== -->
+  <!-- ===== SCROLL REVEAL SCRIPT ===== -->
   <script>
-    const slides = document.querySelectorAll('.slide');
-    const dots = document.querySelectorAll('.dot');
-    let current = 0;
-
-    function showSlide(index) {
-      slides.forEach((s, i) => {
-        s.classList.toggle('active', i === index);
-        dots[i].classList.toggle('active', i === index);
+    const rows = document.querySelectorAll('.result-row');
+    const observer = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          observer.unobserve(entry.target);
+        }
       });
-      current = index;
-    }
+    }, { threshold: 0.25 });
 
-    function nextSlide() {
-      const next = (current + 1) % slides.length;
-      showSlide(next);
-    }
-
-    dots.forEach((dot, idx) => {
-      dot.addEventListener('click', () => showSlide(idx));
-    });
-
-    setInterval(nextSlide, 5000); // auto-advance every 5 s
+    rows.forEach(r => observer.observe(r));
   </script>
 </body>
 </html>
