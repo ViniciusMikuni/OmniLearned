@@ -262,7 +262,7 @@ def load_data(
                 raise ValueError(f"No download URL found for dataset '{dataset_name}'.")
             download_h5_files(url, dataset_path)
 
-        h5_files = list(dataset_path.glob("*.h5"))
+        h5_files = list(dataset_path.glob("*.h5")) + list(dataset_path.glob("*.hdf5"))
         file_list.extend(map(str, h5_files))  # Convert to string paths
 
         index_file = dataset_path / "file_index.npy"

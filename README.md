@@ -1,6 +1,23 @@
 # OmniLearned Official Repository
 
-This repository contains the software package necessary to reproduce all the results presented in the OmniLearned paper, as well as intructions on how to use your own dataset!
+This repository contains the software package necessary to reproduce all the results presented in the OmniLearned paper, as well as intructions on how to use your own dataset! If you find the repository useful, please cite:
+
+```bibtex
+@article{Bhimji:2025isp,
+    author = "Bhimji, Wahid and Harris, Chris and Mikuni, Vinicius and Nachman, Benjamin",
+    title = "{OmniLearned: A Foundation Model Framework for All Tasks Involving Jet Physics}",
+    eprint = "2510.24066",
+    archivePrefix = "arXiv",
+    primaryClass = "hep-ph",
+    month = "10",
+    year = "2025"
+}
+```
+
+
+![Visualization of PET](./assets/PET2.pdf)
+![Results](./assets/top_tagging_rej30.pdf)
+
 
 ## Table of Contents
 - [Installation](#installation)
@@ -8,6 +25,8 @@ This repository contains the software package necessary to reproduce all the res
 - [Training](#training)
 - [Evaluation](#evaluation)
 - [Using the Pre-trained checkpoint](#using-the-pre-trained-checkpoint)
+- [Train your Own Model](#creating-your-own-dataset)
+- [Special Use Cases](#special-use-cases)
 
 
 ## Installation
@@ -292,11 +311,80 @@ We also provide trained checkpoints for the medium (m) and large (l) models. The
 
 ## Creating Your Own Dataset
 
-Instead of using the pre-loaded dataset you can use OmniLearned on your own problem. For this create a folder named ```custom``` where your dataset will be saved. Inside this folder, create the subfolders train/test/val.
+Instead of using the pre-loaded dataset you can use OmniLearned on your own problem. For this create a folder named ```custom``` where your dataset will be saved. Inside this folder, create the subfolders train/test/val. These folders will hold your datasets used during the training of OmniLearned.
 
+### Dataset Contents
 
+The minimum requirement is that your file, saved as an .h5, file contains a dataset named ```data``` containing the kinematic information of your particles in the following order:
+
+- $\Delta\eta$: pseudorapidity difference between the particle and jet axis
+- $\Delta\phi$: azimuthal angle difference between the particle and jet axis
+- $\log(p_T)$:  log of the particles transverse momentum
+- $\log(E)$:    log of the particles energy
+
+If that corresponds to all information given, the dataset named ```data``` will have shape (N,M,4), where N is the number of entries and M is the maximum number of particles in the dataset.
+
+Additional features can be included, such as the PID. In this case, create a single feature per particle with an integer that assigns a different ID to different types of PIDs considered. You can use the following pseudo-code to convert PDGID values to a pid feature used in OmniLearned.
+
+```bash
+#Use only experimentally-acessible PIDs
+pid[pid==321] = 211
+pid[pid==2212] = 211
+pid[pid==-321] = -211
+pid[pid==-2212] = -211
+pid[pid==2112] = 130
+pid[pid==-2112] = 130
+integer_pid = np.searchsorted(np.unique(pid), pid)
+```
+
+by default, the PID position in the dataset named ```data``` is expected to be at position 4 but can be changed by modifying the argument passed to the flag ```--pid_idx``` when running OmniLearned. Don't forget to use the flag ```--use-pid``` when training the model.
+
+Additional features, such as vertex information, can also be included in the model. These can be added after the kinematic information and PID in the dataset and used by the model by adding the flags ```--use-add --num-add X```. If you want to consider exactly the same features used by OmniLearned, then 4 additional features are used in the form of :
+
+- $\tanh D_0$:  hyperbolic tangent of the transverse impact parameter
+- $\D_0$ error: Error in the $D_0$ estimation
+- $\tanh D_z$:  hyperbolic tangent of the  impact parameter in the z-direction
+- $\D_z$ error: Error in the $D_z$ estimation
+
+However any relevant information can be included in these entries.
+
+These are all the information to be included in the ```data``` dataset inside the hdf5 file. Beyond that you should include the entries:
+
+- ```pid```: Integer label for classification or generative model conditioning.
+- ```global```: Global Jet information used to condition the model, such as jet mass, momenta, particle multiplicity. For classification, these inputs are optional. For generation, the particle multiplicity, set as the last feature of the dataset, is required since the model needs to know how many particles to generate.
+
+After creating your dataset, you can run the dataloader app to create the index file. After that you can train the model by setting  ```--dataset custom```.
+
+## Special Use Cases
+
+In the OmniLearned paper we detail the training of OmniLearned to perform anomaly detection and to classify jets using an auxillary task. The steps to run these studies are detailed below.
+
+### Anomaly Detection
+
+The CATHODE style anomaly detection requires the training of the generative model using the side-bands, generation of background examples in the signal region, and training of the classifier to distinguish data from generated background. All these steps will be detailed soon.
+
+Alternatively, one can evaluate the pre-trained model across the Aspen Dataset, use the sidebands to determine the background function, and apply cuts to the classifier output to identify anomalies. The pretrained classifier evaluation can be carried out using the commands:
+
+```bash
+omnilearned evaluate -i /YOUR/CHECKPOINT/FOLDER  --save-tag pretrain_m --dataset aspen  --num-classes 210 --size small --use-event-loss --interaction --batch 64 --use-pid --use-add
+```
+Notice that since the ASPEN Open Jets dataset is large, the evaluation step might take a while, even when multiple GPUs are used.
+
+### Flavour Tagging
+
+In this example we need to replace the loaded diffusion head with a track origin predictor. That requires the use of a new loss (classification) assigned to the outputs of the generative head, as well a different training workflow. These changes are automatic within OmniLearned when calling the following training command:
+
+```bash
+omnilearned train  -o /YOUR/CHECKPOINT/FOLDER --save-tag atlas_flav --dataset atlas_flav --epoch 30 --lr 5e-4 --size small --use-add --num-add 17 --num-classes 4 --iterations 2000 --batch 512 --interaction --num-gen-classes 8 --mode ftag --conditional --num-cond 4
+```
+
+By using ```--mode ftag``` all changes needed will be handle internally in OmniLearned.
+
+### 
 
 ## Contributing
+
+if you find any bugs or have suggestions to improve the framework feel free to open an issue. If you plan to submit a PR don't forget to lint the code first.
 
 ### Linting
 To lint the code, run:

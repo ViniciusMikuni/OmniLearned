@@ -78,12 +78,20 @@ def network_wrapper(model, z, condition, pid, add_info, y, time):
 
 
 def generate(
-    model, y, shape, cond=None, pid=None, add_info=None, nsteps=128, device="cuda"
+    model,
+    y,
+    shape,
+    cond=None,
+    pid=None,
+    add_info=None,
+    nsteps=128,
+    multiplicity_idx=-1,
+    device="cuda",
 ) -> torch.Tensor:
     x = torch.randn(*shape).to(device)  # x_T ~ N(0, 1)
     nsample = x.shape[0]
     # Let's create the mask for the zero-padded particles
-    nparts = (100 * cond[:, -1]).int().view((-1, 1)).to(device)
+    nparts = (100 * cond[:, multiplicity_idx]).int().view((-1, 1)).to(device)
     max_part = x.shape[1]
     mask = torch.tile(
         torch.arange(max_part).to(device), (nparts.shape[0], 1)
