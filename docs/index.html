@@ -4,7 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OmniLearned</title>
-  <link rel="stylesheet" href="styles.css" />
   <style>
     body {
       font-family: 'Inter', sans-serif;
@@ -28,9 +27,7 @@
       font-weight: 600;
     }
 
-    nav a:hover {
-      text-decoration: underline;
-    }
+    nav a:hover { text-decoration: underline; }
 
     main {
       max-width: 1200px;
@@ -42,82 +39,87 @@
     .intro {
       display: flex;
       align-items: center;
-      justify-content: center;
+      justify-content: space-between;
       flex-wrap: wrap;
-      gap: 2rem;
+      gap: 3rem;
       margin-bottom: 5rem;
     }
 
     .intro-text {
-      flex: 1 1 450px;
-      font-size: 1.1rem;
+      flex: 1 1 45%;
+      font-size: 1.2rem;
+      line-height: 1.6;
     }
 
     .intro-figure img {
       width: 100%;
-      max-width: 650px;
-      border-radius: 12px;
-      box-shadow: 0 6px 14px rgba(0,0,0,0.2);
+      max-width: 1000px;
+      border-radius: 16px;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.25);
     }
 
-    /* ---- RESULTS ---- */
+    /* ---- RESULTS CAROUSEL ---- */
     .results {
-      margin-top: 3rem;
-    }
-
-    .results h2 {
       text-align: center;
-      margin-bottom: 2.5rem;
     }
 
-    .result-row {
+    .carousel {
+      position: relative;
+      overflow: hidden;
+      max-width: 1000px;
+      margin: 2rem auto;
+      border-radius: 16px;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.25);
+    }
+
+    .slide {
       display: flex;
       align-items: center;
       justify-content: space-between;
       flex-wrap: wrap;
-      gap: 2.5rem;
-      margin: 4rem 0;
-    }
-
-    .result-row.reverse {
-      flex-direction: row-reverse;
-    }
-
-    .result-image img {
-      width: 100%;
-      max-width: 750px; /* larger figure */
-      border-radius: 12px;
-      box-shadow: 0 6px 14px rgba(0,0,0,0.2);
-      transition: transform 0.5s ease;
-    }
-
-    .result-image img:hover {
-      transform: scale(1.02);
-    }
-
-    .result-text {
-      flex: 1 1 450px;
-      font-size: 1.05rem;
-    }
-
-    .result-text h3 {
-      margin-top: 0;
-      color: #4a1d59;
-    }
-
-    /* ---- SCROLL FADE ---- */
-    .fade-in {
+      gap: 2rem;
       opacity: 0;
-      transform: translateY(60px);
-      transition: all 1.2s ease-out;
+      position: absolute;
+      inset: 0;
+      transition: opacity 1s ease-in-out;
+      background: #fff;
+      padding: 2rem;
     }
 
-    .fade-in.visible {
-      opacity: 1;
-      transform: translateY(0);
+    .slide.active { opacity: 1; position: relative; }
+
+    .slide img {
+      width: 100%;
+      max-width: 700px;
+      border-radius: 12px;
     }
 
-    /* ---- FOOTER ---- */
+    .slide-text {
+      flex: 1 1 40%;
+      font-size: 1.1rem;
+      text-align: left;
+    }
+
+    .dots {
+      text-align: center;
+      margin-top: 1rem;
+    }
+
+    .dot {
+      height: 12px;
+      width: 12px;
+      margin: 0 5px;
+      background-color: #bbb;
+      border-radius: 50%;
+      display: inline-block;
+      transition: background-color 0.3s;
+      cursor: pointer;
+    }
+
+    .dot.active {
+      background-color: #4a1d59;
+    }
+
     footer {
       text-align: center;
       background: #4a1d59;
@@ -128,15 +130,14 @@
 
     /* ---- RESPONSIVE ---- */
     @media (max-width: 850px) {
-      .result-row, .result-row.reverse, .intro {
+      .intro, .slide {
         flex-direction: column;
         text-align: center;
       }
-
-      .intro-figure img,
-      .result-image img {
+      .intro-figure img, .slide img {
         max-width: 100%;
       }
+      .slide-text { text-align: center; }
     }
   </style>
 </head>
@@ -153,13 +154,13 @@
 
   <main>
     <!-- ===== MODEL SECTION ===== -->
-    <section class="intro fade-in">
+    <section class="intro">
       <div class="intro-text">
         <h2>OmniLearned Model</h2>
         <p>
           <b>OmniLearned</b> is a Point Cloud Foundation Model for Jet Physics.
           It builds upon OmniLearn with improved architecture and is pre-trained on
-          <b>1&nbsp;billion jets</b>, with all datasets accessible from the software package!
+          <b>1 billion jets</b>, with all datasets accessible from the software package!
         </p>
       </div>
       <div class="intro-figure">
@@ -171,46 +172,52 @@
     <section class="results">
       <h2>Results Showcase</h2>
 
-      <div class="result-row fade-in">
-        <div class="result-image">
+      <div class="carousel">
+        <!-- Slide 1 -->
+        <div class="slide active">
           <img src="plots/top_tagging_rej30.png" alt="Top Tagging">
+          <div class="slide-text">
+            <h3>Jet Tagging Performance</h3>
+            <p>
+              We compare <b>OmniLearned</b> results for the Community Top Tagging
+              Dataset and find that for a fixed signal efficiency, OmniLearned achieves
+              the highest background rejection of all benchmarks!
+            </p>
+          </div>
         </div>
-        <div class="result-text">
-          <h3>Jet Tagging Performance</h3>
-          <p>
-            We compare <b>OmniLearned</b> results for the Community Top Tagging
-            Dataset and find that for a fixed signal efficiency, OmniLearned achieves
-            the highest background rejection of all benchmarks!
-          </p>
-        </div>
-      </div>
 
-      <div class="result-row reverse fade-in">
-        <div class="result-image">
+        <!-- Slide 2 -->
+        <div class="slide">
           <img src="plots/atlas_results.png" alt="ATLAS Flavor Tagging">
+          <div class="slide-text">
+            <h3>ATLAS Flavour Tagging</h3>
+            <p>
+              We also see improvements in flavour tagging using the ATLAS open dataset,
+              consisting of realistic simulations — sometimes improving the background
+              rejection by a factor of two for certain signal efficiencies!
+            </p>
+          </div>
         </div>
-        <div class="result-text">
-          <h3>ATLAS Flavour Tagging</h3>
-          <p>
-            We also see improvements in flavour tagging using the ATLAS open dataset,
-            consisting of realistic simulations — sometimes improving the background
-            rejection by a factor of two for certain signal efficiencies!
-          </p>
+
+        <!-- Slide 3 -->
+        <div class="slide">
+          <img src="plots/ad_results.png" alt="Anomaly Detection">
+          <div class="slide-text">
+            <h3>Anomaly Detection</h3>
+            <p>
+              Even though top quarks are only 0.1% of the Aspen Open Jets dataset,
+              <b>OmniLearned</b> can still find them — while models trained from
+              scratch cannot!
+            </p>
+          </div>
         </div>
       </div>
 
-      <div class="result-row fade-in">
-        <div class="result-image">
-          <img src="plots/ad_results.png" alt="Anomaly Detection">
-        </div>
-        <div class="result-text">
-          <h3>Anomaly Detection</h3>
-          <p>
-            Even though top quarks are only 0.1% of the Aspen Open Jets dataset,
-            <b>OmniLearned</b> can still find them — while models trained from
-            scratch cannot!
-          </p>
-        </div>
+      <!-- Dots -->
+      <div class="dots">
+        <span class="dot active"></span>
+        <span class="dot"></span>
+        <span class="dot"></span>
       </div>
     </section>
   </main>
@@ -219,19 +226,30 @@
     <p>© 2025 Vinicius Mikuni | KMI Nagoya University</p>
   </footer>
 
-  <!-- ===== SCROLL FADE-IN SCRIPT ===== -->
+  <!-- ===== CAROUSEL SCRIPT ===== -->
   <script>
-    const fadeElements = document.querySelectorAll('.fade-in');
-    const observer = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('visible');
-          observer.unobserve(entry.target);
-        }
-      });
-    }, { threshold: 0.1 });
+    const slides = document.querySelectorAll('.slide');
+    const dots = document.querySelectorAll('.dot');
+    let current = 0;
 
-    fadeElements.forEach(el => observer.observe(el));
+    function showSlide(index) {
+      slides.forEach((s, i) => {
+        s.classList.toggle('active', i === index);
+        dots[i].classList.toggle('active', i === index);
+      });
+      current = index;
+    }
+
+    function nextSlide() {
+      const next = (current + 1) % slides.length;
+      showSlide(next);
+    }
+
+    dots.forEach((dot, idx) => {
+      dot.addEventListener('click', () => showSlide(idx));
+    });
+
+    setInterval(nextSlide, 5000); // auto-advance every 5 s
   </script>
 </body>
 </html>
