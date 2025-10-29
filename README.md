@@ -342,9 +342,9 @@ by default, the PID position in the dataset named ```data``` is expected to be a
 Additional features, such as vertex information, can also be included in the model. These can be added after the kinematic information and PID in the dataset and used by the model by adding the flags ```--use-add --num-add X```. If you want to consider exactly the same features used by OmniLearned, then 4 additional features are used in the form of :
 
 - $\tanh D_0$:  hyperbolic tangent of the transverse impact parameter
-- $\D_0$ error: Error in the $D_0$ estimation
+- $D_0$ error: Error in the $D_0$ estimation
 - $\tanh D_z$:  hyperbolic tangent of the  impact parameter in the z-direction
-- $\D_z$ error: Error in the $D_z$ estimation
+- $D_z$ error: Error in the $D_z$ estimation
 
 However any relevant information can be included in these entries.
 
@@ -384,7 +384,7 @@ By using ```--mode ftag``` all changes needed will be handle internally in OmniL
 
 ## Contributing
 
-if you find any bugs or have suggestions to improve the framework feel free to open an issue. If you plan to submit a PR don't forget to lint the code first.
+If you find any bugs or have suggestions to improve the framework feel free to open an issue. If you plan to submit a PR don't forget to lint the code first.
 
 ### Linting
 To lint the code, run:
