@@ -15,8 +15,8 @@ This repository contains the software package necessary to reproduce all the res
 ```
 
 
-![Visualization of PET](./assets/PET2.pdf)
-![Results](./assets/top_tagging_rej30.pdf)
+![Visualization of PET](./assets/PET2.png)
+![Results](./assets/top_tagging_rej30.png)
 
 
 ## Table of Contents
