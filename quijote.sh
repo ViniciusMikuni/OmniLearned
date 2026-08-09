@@ -1,93 +1,101 @@
-module load pytorch
+#!/bin/bash
+set -euo pipefail
+set -x
+
+module load pytorch/2.8.0
 
 export HDF5_USE_FILE_LOCKING=FALSE
 export NCCL_NET_GDR_LEVEL=PHB
+export MASTER_ADDR="$(hostname)"
 
-# for DDP
-export MASTER_ADDR=$(hostname)
+BATCH=2
 
+# Arguments shared by every experiment
+COMMON_ARGS=(
+    -o /pscratch/sd/v/vmikuni/PET/checkpoints/
+    --size small
+    --num-classes 2
+    --num-feat 3
+    --batch "$BATCH"
+    --fine-tune
+    --interaction-type astro
+    --local-interaction
+    --num-coord 3
+    --wandb
+)
 
+run_experiment() {
+    local nevt="$1"
+    local save_tag="$2"
+    local dataset="$3"
+    local pretrain_tag="$4"
+    local mode="$5"
+    local epochs="$6"
+    local lr="$7"
+    local wd="$8"
+    local lr_factor="$9"
+    local train_nevts="${10}"
+    local iterations="${11}"
 
-export BATCH=2
+    shift 11
+    local -a extra_args=("$@")
 
+    local -a cmd=(
+        omnilearned train
+        "${COMMON_ARGS[@]}"
+        --save-tag "${save_tag}_${nevt}"
+        --dataset "$dataset"
+        --mode "$mode"
+        --epoch "$epochs"
+        --lr "$lr"
+        --wd "$wd"
+        --lr-factor "$lr_factor"
+    )
 
+    [[ -n "$pretrain_tag" ]] &&
+        cmd+=(--pretrain-tag "$pretrain_tag")
 
-export NEVT=100
+    [[ -n "$train_nevts" ]] &&
+        cmd+=(--nevts "$train_nevts")
 
-cmd="omnilearned train -o /pscratch/sd/v/vmikuni/PET/checkpoints/ --save-tag quijote_noint_s_$NEVT --dataset quijote --epoch 20 --lr 5e-4 --size small --wd 0.0 --num-classes 2 --num-feat 3 --batch $BATCH --mode regression --nevts 6   --interaction-type astro  --num-coord 3 --k 20  --iterations 100"
+    [[ -n "$iterations" ]] &&
+        cmd+=(--iterations "$iterations")
 
-set -x
-srun -l -u \
-    bash -c "
-    source export_ddp.sh
-    $cmd
-    "
+    cmd+=("${extra_args[@]}")
 
-
-cmd="omnilearned train -o /pscratch/sd/v/vmikuni/PET/checkpoints/ --save-tag v_quijote_noint_s_$NEVT --dataset quijote --epoch 20 --lr 5e-4 --size small --wd 0.0 --num-classes 2 --num-feat 3 --batch $BATCH  --mode segmentation --num-gen-classes 3 --nevts 6  --interaction-type astro  --num-coord 3 --k 20 --iterations 100"
-
-set -x
-srun -l -u \
-    bash -c "
-    source export_ddp.sh
-    $cmd
-    "
-
-
-export VEPOCHS=300
-export REPOCHS=250
-export LR=1e-4
-export WD=1.0
-
-
-export NEVT=1000
-
-
-
-cmd="omnilearned train -o /pscratch/sd/v/vmikuni/PET/checkpoints/ --save-tag quijote_noint_s_$NEVT --dataset quijote --epoch $REPOCHS --lr $LR --size small --wd $WD --num-classes 2 --num-feat 3 --batch $BATCH --mode regression --nevts 62    --interaction-type astro   --num-coord 3 --k 20"
-
-set -x
-srun -l -u \
-    bash -c "
-    source export_ddp.sh
-    $cmd
-    "
-
-
-cmd="omnilearned train -o /pscratch/sd/v/vmikuni/PET/checkpoints/ --save-tag v_quijote_noint_s_$NEVT --dataset quijote --epoch $VEPOCHS --lr $LR --size small --wd $WD --num-classes 2 --num-feat 3 --batch $BATCH  --mode segmentation --num-gen-classes 3 --nevts 62    --interaction-type astro  --num-coord 3 --k 20"
-
-set -x
-srun -l -u \
-    bash -c "
-    source export_ddp.sh
-    $cmd
-    "
-
-
-
-
-export NEVT=19651
+    srun -l -u bash -c '
+        source export_ddp.sh
+        exec "$@"
+    ' bash "${cmd[@]}"
+}
 
 
+# Arguments:
+# NEVT  SAVE_TAG  DATASET  PRETRAIN_TAG  MODE
+# EPOCHS  LR  WD  LR_FACTOR  --nevts  --iterations  EXTRA_ARGS
 
-cmd="omnilearned train -o /pscratch/sd/v/vmikuni/PET/checkpoints/ --save-tag quijote_noint_s_$NEVT --dataset quijote --epoch $REPOCHS --lr $LR --size small --wd $WD --num-classes 2 --num-feat 3 --batch $BATCH --mode regression   --interaction-type astro  --num-coord 3 --k 20"
-
-set -x
-srun -l -u \
-    bash -c "
-    source export_ddp.sh
-    $cmd
-    "
-
-
-cmd="omnilearned train -o /pscratch/sd/v/vmikuni/PET/checkpoints/ --save-tag v_quijote_noint_s_$NEVT --dataset quijote --epoch $VEPOCHS --lr $LR --size small --wd $WD --num-classes 2 --num-feat 3 --batch $BATCH  --mode segmentation --num-gen-classes 3   --interaction-type astro  --num-coord 3 --k 20"
-
-set -x
-srun -l -u \
-    bash -c "
-    source export_ddp.sh
-    $cmd
-    "
+NEVT = 100
+run_experiment 100 fine_tune_quijote_baseline_s   quijote pretrain_s          regression   20 5e-6 1.0 20.0 6 60 --k 20 
+run_experiment 100 fine_tune_quijote_freeze_s     quijote pretrain_s          regression   20 5e-6 0.1 2.0 6 60 --k 20  --freeze
+run_experiment 100 fine_tune_quijote_gaussian_s   quijote pretrain_s_gaussian regression   30  1e-5 1.0 2.0 6 60  --freeze --k 20
 
 
 
+NEVT = 1000
+run_experiment 1000 fine_tune_quijote_baseline_s   quijote pretrain_s          regression   100  1e-5 0.1 10.0 62 -1 --k 20 
+run_experiment 1000 fine_tune_quijote_gaussian_s   quijote pretrain_s_gaussian regression   200  1e-5 0.1 2.0 62 100  --freeze --k 20
+run_experiment 1000 fine_tune_quijote_freeze_s     quijote pretrain_s          regression   80  1e-5 1.0 10.0 62 -1 --freeze --k 20
+
+run_experiment 1000 fine_tune_v_quijote_baseline_s quijote pretrain_s          segmentation 200  1e-5 1.0 20.0 62 -1 --num-gen-classes 3 --k 20 --resuming
+run_experiment 1000 fine_tune_v_quijote_gaussian_s quijote pretrain_s_gaussian segmentation 200  1e-5 1.0 20.0 62 -1 --num-gen-classes 3 --freeze --k 20
+run_experiment 1000 fine_tune_v_quijote_freeze_s   quijote pretrain_s          segmentation 200  1e-5 1.0 20.0 62 -1 --num-gen-classes 3 --freeze --k 20
+
+NEVT = 19651
+run_experiment 19651 fine_tune_quijote_baseline_s   quijote pretrain_s          regression   100  1e-5 0.1 10.0 -1 -1 --k 20
+run_experiment 19651 fine_tune_v_quijote_baseline_s quijote pretrain_s          segmentation 200  1e-5 1.0 20.0 -1 -1 --num-gen-classes 3 --k 20 --resuming
+
+run_experiment 19651 fine_tune_quijote_gaussian_s   quijote pretrain_s_gaussian regression   100  1e-5 0.1 10.0 -1 -1 --k 20  --freeze
+run_experiment 19651 fine_tune_quijote_freeze_s     quijote pretrain_s          regression   100  1e-5 0.1 10.0 -1 -1 --k 20  --freeze
+run_experiment 19651 fine_tune_v_quijote_freeze_s   quijote pretrain_s          segmentation 200  1e-5 1.0 20.0 -1 -1 --num-gen-classes 3 --k 20 --freeze
+run_experiment 19651 fine_tune_v_quijote_gaussian_s quijote pretrain_s_gaussian segmentation 200  1e-5 1.0 20.0 -1 -1 --num-gen-classes 3 --k 20 --freeze
+run_experiment 19651 fine_tune_v_quijote_gaussian_s quijote pretrain_s_gaussian segmentation 200  1e-5 1.0 20.0 -1 -1 --num-gen-classes 3 --k 20 --freeze

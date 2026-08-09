@@ -363,6 +363,16 @@ After creating your dataset, you can run the dataloader app to create the index 
 
 In the OmniLearned paper we detail the training of OmniLearned to perform anomaly detection and to classify jets using an auxillary task. The steps to run these studies are detailed below.
 
+### OmniCosmos
+
+The training using cosmological datasets for parameter inference and velocity prediction from galaxy cluster positions can be run using the same standard commands. For example, you can fine-tune a model using the CAMELS dataset with the commands:
+
+```bash
+omnilearned train  -o ./ --save-tag cosmos_training --dataset camels --path PATH/TO/YOU/STORAGE --size small --epoch 1 --mode regressor --fine-tune --pretrain-tag pretrain_s
+```
+
+For specific benchmarks released with the OmniCosmos paper see the files ```camels.sh``` and ```quijote.sh```
+
 ### Anomaly Detection
 
 The CATHODE style anomaly detection requires the training of the generative model using the side-bands, generation of background examples in the signal region, and training of the classifier to distinguish data from generated background. All these steps will be detailed soon.
