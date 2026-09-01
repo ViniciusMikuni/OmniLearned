@@ -800,6 +800,8 @@ def save_checkpoint(
     lr_scheduler,
     checkpoint_dir,
     checkpoint_name,
+    best_loss=None,
+    best_epoch=None,
 ):
     save_dict = {
         "body": model.module.body.state_dict(),
@@ -808,6 +810,10 @@ def save_checkpoint(
         "loss": loss,
         "sched": lr_scheduler.state_dict(),
     }
+    if best_loss is not None:
+        save_dict["best_loss"] = best_loss
+    if best_epoch is not None:
+        save_dict["best_epoch"] = best_epoch
 
     if model.module.classifier is not None:
         save_dict["classifier_head"] = model.module.classifier.state_dict()
@@ -883,8 +889,15 @@ def restore_checkpoint(
 
         if lr_scheduler is not None:
             lr_scheduler.load_state_dict(checkpoint["sched"])
-        startEpoch = checkpoint["epoch"] + 1
-        best_loss = checkpoint["loss"]
+        # checkpoint["epoch"] is already the count of epochs completed
+        # (save_checkpoint is called with epoch + 1), so it is exactly the
+        # 0-indexed epoch to resume at.
+        startEpoch = checkpoint["epoch"]
+        # best_loss / best_epoch are written only by the every-epoch
+        # last_model_ checkpoint; older best_model_ checkpoints predate them,
+        # so fall back to what those do carry.
+        best_loss = checkpoint.get("best_loss", checkpoint["loss"])
+        best_epoch = checkpoint.get("best_epoch", checkpoint["epoch"] - 1)
 
     else:
 
@@ -942,6 +955,7 @@ def restore_checkpoint(
 
         startEpoch = 0.0
         best_loss = np.inf
+        best_epoch = 0.0
 
     if ema_model is not None:
         if fine_tune:
@@ -961,7 +975,7 @@ def restore_checkpoint(
             if is_main_node:
                 print("Optimizer cannot be loaded back, skipping...")
 
-    return startEpoch, best_loss
+    return startEpoch, best_loss, best_epoch
 
 
 def shadow_copy(model):
@@ -1052,6 +1066,10 @@ def get_param_groups(model, wd, lr, lr_factor=1.0, fine_tune=False, freeze=False
 
 def get_checkpoint_name(tag):
     return f"best_model_{tag}.pt"
+
+
+def get_last_checkpoint_name(tag):
+    return f"last_model_{tag}.pt"
 
 
 def is_master_node():

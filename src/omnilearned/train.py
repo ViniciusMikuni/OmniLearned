@@ -15,6 +15,7 @@ from omnilearned.utils import (
     get_param_groups,
     CLIPLoss,
     get_checkpoint_name,
+    get_last_checkpoint_name,
     shadow_copy,
     get_loss,
     save_checkpoint,
@@ -221,19 +222,24 @@ def train_model(
     iterations_per_epoch=-1,
     epoch_init=0,
     loss_init=np.inf,
+    best_epoch_init=None,
     use_amp=False,
     run=None,
     ema_model=None,
     ema_decay=0.999,
 ):
     checkpoint_name = get_checkpoint_name(save_tag)
+    last_checkpoint_name = get_last_checkpoint_name(save_tag)
 
     losses = {
         "train_loss": [],
         "val_loss": [],
     }
 
-    tracker = {"bestValLoss": loss_init, "bestEpoch": epoch_init}
+    tracker = {
+        "bestValLoss": loss_init,
+        "bestEpoch": epoch_init if best_epoch_init is None else best_epoch_init,
+    }
     if use_amp:
         gscaler = amp.GradScaler()
     else:
@@ -319,6 +325,20 @@ def train_model(
                     output_dir,
                     checkpoint_name,
                 )
+
+        if is_master_node():
+            save_checkpoint(
+                model,
+                ema_model,
+                epoch + 1,
+                optimizer,
+                losses["val_loss"][-1],
+                lr_scheduler,
+                output_dir,
+                last_checkpoint_name,
+                best_loss=tracker["bestValLoss"],
+                best_epoch=tracker["bestEpoch"],
+            )
 
         if run is not None:
             for key in train_logs:
@@ -524,12 +544,23 @@ def run(
 
     epoch_init = 0
     loss_init = np.inf
+    best_epoch_init = None
     checkpoint_name = None
 
-    if os.path.isfile(os.path.join(outdir, get_checkpoint_name(save_tag))) and resuming:
+    last_checkpoint_path = os.path.join(outdir, get_last_checkpoint_name(save_tag))
+    best_checkpoint_path = os.path.join(outdir, get_checkpoint_name(save_tag))
+
+    if resuming and os.path.isfile(last_checkpoint_path):
+        if is_master_node():
+            print(f"Continue training with checkpoint from {last_checkpoint_path}")
+        checkpoint_name = get_last_checkpoint_name(save_tag)
+        fine_tune = False
+
+    elif resuming and os.path.isfile(best_checkpoint_path):
         if is_master_node():
             print(
-                f"Continue training with checkpoint from {os.path.join(outdir, get_checkpoint_name(save_tag))}"
+                f"No last-epoch checkpoint found, continuing training with best "
+                f"checkpoint from {best_checkpoint_path}"
             )
         checkpoint_name = get_checkpoint_name(save_tag)
         fine_tune = False
@@ -542,7 +573,7 @@ def run(
         checkpoint_name = get_checkpoint_name(pretrain_tag)
 
     if checkpoint_name is not None:
-        epoch_init, loss_init = restore_checkpoint(
+        epoch_init, loss_init, best_epoch_init = restore_checkpoint(
             model,
             outdir,
             checkpoint_name,
@@ -607,6 +638,7 @@ def run(
         iterations_per_epoch=iterations,
         epoch_init=epoch_init,
         loss_init=loss_init,
+        best_epoch_init=best_epoch_init,
         use_amp=use_amp,
         run=run,
         ema_model=ema_model,
