@@ -465,19 +465,25 @@ class AttBlock(nn.Module):
         num_tokens=1,
         use_int=False,
         skip=False,
+        use_attn=True,
     ):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.norm2 = norm_layer(dim)
         self.num_tokens = num_tokens
+        self.use_attn = use_attn
 
-        self.attn = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            dropout=attn_drop,
-            bias=False,
-            batch_first=True,
-        )
+        if self.use_attn:
+            self.attn = nn.MultiheadAttention(
+                embed_dim=dim,
+                num_heads=num_heads,
+                bias=False,
+                batch_first=True,
+            )
+
+            self.attn_drop = (
+                NoScaleDropout(attn_drop) if attn_drop > 0.0 else nn.Identity()
+            )
 
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = MLP(
@@ -496,19 +502,22 @@ class AttBlock(nn.Module):
         if self.skip_linear is not None and skip is not None:
             x = self.skip_linear(torch.cat([x, skip], dim=-1)) * mask
 
-        x_norm = self.norm1(x * mask)
-        x = (
-            x
-            + self.attn(
-                query=x_norm,
-                key=x_norm,
-                value=x_norm,
-                key_padding_mask=~mask[:, :, 0] if attn_mask is None else None,
-                attn_mask=attn_mask,
-                need_weights=False,
-            )[0]
-            * mask
-        )
+        if self.use_attn:
+            x_norm = self.norm1(x * mask)
+            x_attn = (
+                self.attn(
+                    query=x_norm,
+                    key=x_norm,
+                    value=x_norm,
+                    key_padding_mask=~mask[:, :, 0] if attn_mask is None else None,
+                    attn_mask=attn_mask,
+                    need_weights=False,
+                )[0]
+                * mask
+            )
+
+            x = x + self.attn_drop(x_attn)
+
         x = x + self.mlp(self.norm2(x), mask)
         return x
 
@@ -525,19 +534,24 @@ class TokenAttBlock(nn.Module):
         norm_layer=nn.LayerNorm,
         num_tokens=1,
         skip=False,
+        use_attn=True,
     ):
         super().__init__()
 
         self.norm = norm_layer(dim)
         self.num_tokens = num_tokens
+        self.use_attn = use_attn
 
-        self.attn = nn.MultiheadAttention(
-            embed_dim=dim,
-            num_heads=num_heads,
-            dropout=attn_drop,
-            bias=False,
-            batch_first=True,
-        )
+        if self.use_attn:
+            self.attn = nn.MultiheadAttention(
+                embed_dim=dim,
+                num_heads=num_heads,
+                bias=False,
+                batch_first=True,
+            )
+            self.attn_drop = (
+                NoScaleDropout(attn_drop) if attn_drop > 0.0 else nn.Identity()
+            )
 
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = MLP(
@@ -558,15 +572,93 @@ class TokenAttBlock(nn.Module):
         tokens = x[:, : self.num_tokens]
         x = x[:, self.num_tokens :]
 
-        tokens = (
-            tokens
-            + self.attn(
+        if self.use_attn:
+            token_attn = self.attn(
                 query=tokens,
                 key=x,
                 value=x,
-                key_padding_mask=~mask[:, :, 0],
+                key_padding_mask=~mask[:, :, 0] if mask is not None else None,
                 need_weights=False,
             )[0]
-        )
+
+            tokens = tokens + self.attn_drop(token_attn)
+
         tokens = tokens + self.mlp(self.norm(tokens))
         return torch.cat([tokens, x], 1)
+
+
+class TokenAttBlockFeatDrop(TokenAttBlock):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        attn_drop=0.0,
+        mlp_drop=0.0,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        num_tokens=1,
+        skip=False,
+        feature_drop=0.0,
+    ):
+        super().__init__(
+            dim=dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            attn_drop=attn_drop,
+            mlp_drop=mlp_drop,
+            act_layer=act_layer,
+            norm_layer=norm_layer,
+            num_tokens=num_tokens,
+            skip=skip,
+        )
+
+        self.dropout = (
+            NoScaleDropout(feature_drop) if feature_drop > 0.0 else nn.Identity()
+        )
+
+    def forward(self, x, mask=None, skip=None):
+        x = super().forward(x, mask=mask, skip=skip)
+        return self.dropout(x)
+
+
+class AttBlockFeatDrop(AttBlock):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        attn_drop=0.0,
+        mlp_drop=0.0,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        num_tokens=1,
+        use_int=False,
+        skip=False,
+        feature_drop=0.0,
+    ):
+        super().__init__(
+            dim=dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            attn_drop=attn_drop,
+            mlp_drop=mlp_drop,
+            act_layer=act_layer,
+            norm_layer=norm_layer,
+            num_tokens=num_tokens,
+            use_int=use_int,
+            skip=skip,
+        )
+
+        self.dropout = (
+            NoScaleDropout(feature_drop) if feature_drop > 0.0 else nn.Identity()
+        )
+
+    def forward(self, x, mask=None, attn_mask=None, skip=None):
+        x = super().forward(
+            x,
+            mask=mask,
+            attn_mask=attn_mask,
+            skip=skip,
+        )
+        return self.dropout(x)

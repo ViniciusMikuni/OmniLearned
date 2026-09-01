@@ -27,11 +27,21 @@ def train(
     path: str = typer.Option("/pscratch/sd/v/vmikuni/datasets", help="Dataset path"),
     wandb: bool = typer.Option(False, help="use wandb logging"),
     fine_tune: bool = typer.Option(False, help="Fine tune the model"),
+    freeze: bool = typer.Option(
+        False, help="Freeze body model weights during fine-tuning"
+    ),
     resuming: bool = typer.Option(False, help="Resume training"),
     # Model Options
     num_feat: int = typer.Option(
         4,
         help="Number of input kinematic features (not considering PID or additional features)",
+    ),
+    num_part: int = typer.Option(
+        150,
+        help="Number of Particles in the Point Cloud. Only necesssary for encoder training",
+    ),
+    num_latent: int = typer.Option(
+        10, help="Latent space size. Only necesssary for encoder training"
     ),
     size: str = typer.Option("small", "--size", "-s", help="Model size"),
     interaction: bool = typer.Option(False, help="Use interaction matrix"),
@@ -101,8 +111,11 @@ def train(
         path,
         wandb,
         fine_tune,
+        freeze,
         resuming,
         num_feat,
+        num_part,
+        num_latent,
         size,
         interaction,
         local_interaction,
@@ -216,6 +229,13 @@ def evaluate(
         4,
         help="Number of input kinematic features (not considering PID or additional features)",
     ),
+    num_part: int = typer.Option(
+        150,
+        help="Number of Particles in the Point Cloud. Only necesssary for encoder training",
+    ),
+    num_latent: int = typer.Option(
+        10, help="Latent space size. Only necesssary for encoder training"
+    ),
     size: str = typer.Option("small", "--size", "-s", help="Model size"),
     interaction: bool = typer.Option(False, help="Use interaction matrix"),
     local_interaction: bool = typer.Option(False, help="Use local interaction matrix"),
@@ -228,6 +248,7 @@ def evaluate(
     num_cond: int = typer.Option(3, help="Number of global conditioning features"),
     use_pid: bool = typer.Option(False, help="Use particle ID for training"),
     pid_idx: int = typer.Option(4, help="Index of the PID in the input array"),
+    pid_dim: int = typer.Option(9, help="Number of unique PIDs"),
     use_add: bool = typer.Option(
         False, help="Use additional features beyond kinematic information"
     ),
@@ -242,7 +263,11 @@ def evaluate(
         1, help="Number of classes in the particle segmentation task"
     ),
     mode: str = typer.Option(
-        "classifier", help="Task to run: classifier, generator, pretrain"
+        "classifier", help="Task to run: classifier, generator, pretrain, encoder"
+    ),
+    sbi: bool = typer.Option(
+        False,
+        help="Run SBI parameter inference. Currently only supported for --mode generator",
     ),
     # Training options
     batch: int = typer.Option(128, help="Batch size"),
@@ -258,6 +283,8 @@ def evaluate(
         dataset,
         path,
         num_feat,
+        num_part,
+        num_latent,
         size,
         interaction,
         local_interaction,
@@ -268,12 +295,14 @@ def evaluate(
         num_cond,
         use_pid,
         pid_idx,
+        pid_dim,
         use_add,
         num_add,
         use_event_loss,
         num_classes,
         num_gen_classes,
         mode,
+        sbi,
         batch,
         num_workers,
         clip_inputs=clip_inputs,

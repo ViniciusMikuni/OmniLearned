@@ -10,7 +10,7 @@ import numpy as np
 from pathlib import Path
 
 
-def collate_point_cloud(batch, max_part=5000):
+def collate_point_cloud(batch, max_part=5000, k=11):
     """
     Collate function for point clouds and labels with truncation performed per batch.
 
@@ -37,7 +37,9 @@ def collate_point_cloud(batch, max_part=5000):
 
     # Use validity mask based on feature index 2
     valid_mask = point_clouds[:, :, 2] != 0
+
     max_particles = min(valid_mask.sum(dim=1).max().item(), max_part)
+    max_particles = max(max_particles, k)
     max_particles = point_clouds.shape[1]
 
     # Truncate point clouds
@@ -50,7 +52,7 @@ def collate_point_cloud(batch, max_part=5000):
         if all(field in item for item in batch):
             stacked = torch.stack([item[field] for item in batch])
             # Truncate if it's sequence-like (i.e., has 2 or more dims)
-            if stacked.dim() >= 2 and stacked.shape[1] >= max_particles:
+            if stacked.shape[1] == point_clouds.shape[1]:
                 stacked = stacked[:, :max_particles].contiguous()
             result[field] = stacked
         else:
@@ -160,10 +162,11 @@ class HEPDataset(Dataset):
         sample = {}
 
         sample["X"] = torch.tensor(f["data"][sample_idx], dtype=torch.float32)
+        # sample["X"] = sample["X"][:,:4]
         if self.clip_inputs:
             # Enforce particles to be inside R=0.8 and pT > 0.5 MeV
             mask_part = (torch.hypot(sample["X"][:, 0], sample["X"][:, 1]) < 0.8) & (
-                sample["X"][:, 2] > 0.0
+                sample["X"][:, 2] > -0.7
             )
             sample["X"][:, 3] = np.clip(
                 sample["X"][:, 3], a_min=sample["X"][:, 2], a_max=None
@@ -172,12 +175,7 @@ class HEPDataset(Dataset):
 
         label = f["pid"][sample_idx]
 
-        if self.mode == "regression":
-            pid_dtype = torch.float32
-        else:
-            pid_dtype = torch.int64
-
-        sample["y"] = torch.tensor(label - self.label_shift, dtype=pid_dtype)
+        sample["y"] = torch.tensor(label - self.label_shift, dtype=torch.float32)
         if "global" in f and self.use_cond:
             sample["cond"] = torch.tensor(f["global"][sample_idx], dtype=torch.float32)
 
@@ -190,7 +188,10 @@ class HEPDataset(Dataset):
         if self.use_add:
             # Assume any additional info appears last
             sample["add_info"] = sample["X"][:, -self.num_add :]
+            # mask_part = ~(sample["add_info"][:, 1] == -1.0)
+            # sample["add_info"] = sample["add_info"]*mask_part.unsqueeze(-1).float()
             sample["X"] = sample["X"][:, : -self.num_add]
+            # print(sample["add_info"])
 
         if self.mode in ["segmentation", "ftag"]:
             if self.mode == "segmentation":
@@ -238,6 +239,7 @@ def load_data(
         "pretrain",
         "atlas",
         "aspen",
+        "aspen_small",
         "jetclass",
         "jetclass2",
         "h1",
@@ -251,15 +253,63 @@ def load_data(
         "aspen_top_ad_sb",
         "aspen_top_ad_sr",
         "aspen_top_ad_sr_hl",
-        "qcd_dijet",
+        "jetht_dijet",
+        "jetht2017_dijet",
+        "singlemuon_dijet",
+        "qcd600_dijet",
+        "qcd_dijet_0",
+        "qcd_dijet_1",
+        "qcd_dijet_2",
+        "qcd_dijet_3",
+        "qcd_dijet_4",
+        "qcd_dijet_5",
+        "qcd_dijet_6",
+        "qcd_dijet_7",
+        "qcd_dijet_8",
+        "qcd_dijet_9",
+        "higgs_dijet",
+        "vh_dijet",
+        "wjets_dijet",
+        "zjets_dijet",
+        "top_dijet",
+        "top0_dijet",
+        "top1_dijet",
+        "top2_dijet",
+        "top3_dijet",
+        "stop_dijet",
+        "stopw_dijet",
+        "dihiggs_dijet",
+        "ww_dijet",
+        "wz_dijet",
+        "zz_dijet",
+        "topw_dijet",
+        "topz_dijet",
+        "wjets_cr",
+        "topv_cr",
+        "top_cr",
+        "top0_cr",
+        "top1_cr",
+        "top2_cr",
+        "top3_cr",
+        "stop_cr",
+        "stopw_cr",
+        "topw_cr",
+        "singlemuon_cr",
         "jetnet150",
+        "jetnet150_ae",
         "jetnet30",
+        "jetnet30_ae",
         "dctr",
         "atlas_flav",
+        "atlas_ad",
         "custom",
         "camels",
+        "camels_ae",
         "quijote",
+        "gaussian",
         "microboone",
+        "minerva",
+        "doraemon",
         "aspen_bsm_ad_sb",
         "aspen_bsm_ad_sr",
         "aspen_bsm_ad_sr_hl",
@@ -358,6 +408,8 @@ def load_data(
         num_workers=num_workers,
         drop_last=False,
         collate_fn=collate_point_cloud,
+        # persistent_workers=num_workers > 0,
+        # prefetch_factor=4 if num_workers > 0 else None,
     )
     return loader
 

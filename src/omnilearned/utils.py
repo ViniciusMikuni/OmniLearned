@@ -21,6 +21,25 @@ def get_model_parameters(model_size):
         model_dict["base_dim"] = 128
         model_dict["mlp_ratio"] = 2
 
+    elif model_size == "lite":
+        model_dict["num_transformers"] = 8
+        model_dict["num_transformers_head"] = 2
+        model_dict["num_tokens"] = 4
+        model_dict["num_heads"] = 8
+        model_dict["base_dim"] = 128
+        model_dict["mlp_ratio"] = 2
+        model_dict["use_local"] = False
+
+    elif model_size == "dense":
+        model_dict["num_transformers"] = 8
+        model_dict["num_transformers_head"] = 2
+        model_dict["num_tokens"] = 4
+        model_dict["num_heads"] = 8
+        model_dict["base_dim"] = 128
+        model_dict["mlp_ratio"] = 2
+        model_dict["use_local"] = False
+        model_dict["use_attn"] = False
+
     elif model_size == "medium":
         model_dict["num_transformers"] = 12
         model_dict["num_transformers_head"] = 2
@@ -204,6 +223,466 @@ def get_class_loss(weight, pred, y, class_cost, use_event_loss=False, logs={}):
     return loss
 
 
+# def wd_loss(x_hat, x, mask, mask_logits=None,
+#             blur=0.01, blur_start=None, n_iter=100,
+#             scaling=0.5, eps=1e-8, chunk_size=128):
+#     """
+#     Memory-efficient entropic Wasserstein (Sinkhorn) distance for cosmological
+#     halo point clouds with 3D position + 3D velocity, both standardized
+#     (mean 0, std 1), so the ground cost is plain 6D Euclidean. No dependencies.
+
+#     x_hat:  (B, M, 6) reconstructed halos  (x, y, z, vx, vy, vz)
+#     x:      (B, N, 6) real halos
+#     mask:        (B, N, 1) real-particle mask (1 keep, 0 padded)   [required]
+#     mask_logits: (B, M)    optional predicted presence logits for x_hat slots.
+#                            If None, x_hat is treated as uniform over M slots.
+
+#     Ground cost: Euclidean distance in 6D (p=1). Returns mean-over-batch
+#     entropic OT cost.
+
+#     Memory strategy:
+#       - the (B, M, N) cost matrix is never fully materialized; it is computed
+#         in column chunks of width `chunk_size`.
+#       - the Sinkhorn fixed-point iterations run under torch.no_grad(); a single
+#         final differentiable update lets gradients flow to the inputs. This
+#         avoids storing ~n_iter copies of intermediate (B, M, chunk) tensors.
+#     """
+#     B, M, F = x_hat.shape
+#     N = x.shape[1]
+
+#     mask = mask.squeeze(-1)                               # (B, N)
+
+#     # --- keep coordinates finite (padded points may hold garbage) ---
+#     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+#     x_hat = torch.nan_to_num(x_hat, nan=0.0, posinf=0.0, neginf=0.0)
+
+#     # --- measures ---
+#     if mask_logits is not None:
+#         w_hat = torch.sigmoid(mask_logits)               # (B, M)
+#     else:
+#         w_hat = torch.ones(B, M, device=x.device, dtype=x.dtype)
+#     w = mask                                             # (B, N); padded -> 0
+
+#     a = w_hat / (w_hat.sum(dim=1, keepdim=True) + eps)   # (B, M)
+#     b = w     / (w.sum(dim=1, keepdim=True) + eps)       # (B, N)
+
+#     log_a = torch.log(a + eps)                           # (B, M)
+#     log_b = torch.log(b + eps)                           # (B, N)
+
+#     # boolean mask for padded columns, used to neutralize them in the updates
+#     pad = (mask == 0)                                     # (B, N)
+#     log_b = log_b.masked_fill(pad, -1e9)
+
+#     # --- chunked ground cost columns  C[:, :, j0:j1]  (B, M, c) ---
+#     def cost_block(j0, j1):
+#         yj = x[:, j0:j1, :]                               # (B, c, F)
+#         yh2 = (x_hat ** 2).sum(-1, keepdim=True)          # (B, M, 1)
+#         yj2 = (yj ** 2).sum(-1).unsqueeze(1)              # (B, 1, c)
+#         cross = torch.bmm(x_hat, yj.transpose(1, 2))      # (B, M, c)
+#         d2 = (yh2 + yj2 - 2 * cross).clamp_min(0.0)
+#         return (d2 + 1e-12).sqrt()                        # (B, M, c), safe grad
+
+#     # --- epsilon annealing schedule (multiscale) ---
+#     eps_final = blur
+#     if blur_start is None:
+#         with torch.no_grad():
+#             cmax = cost_block(0, min(N, 256)).max().item()
+#         eps_start = max(blur, cmax * 0.5 + eps)
+#     else:
+#         eps_start = max(blur, blur_start)
+
+#     def make_schedule(n):
+#         if scaling <= 0 or scaling >= 1:
+#             return [eps_final] * n
+#         sched, e = [], eps_start
+#         while e > eps_final:
+#             sched.append(e)
+#             e *= scaling
+#         sched.append(eps_final)
+#         if len(sched) < n:
+#             sched += [eps_final] * (n - len(sched))
+#         else:
+#             sched = sched[:n]
+#         return sched
+
+#     schedule = make_schedule(n_iter)
+
+#     # --- chunked log-domain dual updates ---
+#     # f_i = -reg * logsumexp_j ( log_b_j + (g_j - C_ij)/reg )
+#     def update_f(g, reg):
+#         parts = []
+#         for j0 in range(0, N, chunk_size):
+#             j1 = min(N, j0 + chunk_size)
+#             C = cost_block(j0, j1)                        # (B, M, c)
+#             t = log_b[:, j0:j1].unsqueeze(1) + (g[:, j0:j1].unsqueeze(1) - C) / reg
+#             parts.append(torch.logsumexp(t, dim=2, keepdim=True))   # (B, M, 1)
+#             del C, t
+#         lse = torch.logsumexp(torch.cat(parts, dim=2), dim=2)       # (B, M)
+#         return -reg * lse
+
+#     # g_j = -reg * logsumexp_i ( log_a_i + (f_i - C_ij)/reg )
+#     def update_g(f, reg):
+#         parts = []
+#         for j0 in range(0, N, chunk_size):
+#             j1 = min(N, j0 + chunk_size)
+#             C = cost_block(j0, j1)                        # (B, M, c)
+#             t = log_a.unsqueeze(2) + (f.unsqueeze(2) - C) / reg
+#             parts.append(-reg * torch.logsumexp(t, dim=1))          # (B, c)
+#             del C, t
+#         g = torch.cat(parts, dim=1)                       # (B, N)
+#         return g.masked_fill(pad, -1e9)
+
+#     # --- initialize duals ---
+#     f = torch.zeros_like(log_a)
+#     g = torch.zeros_like(log_b).masked_fill(pad, -1e9)
+
+#     # --- converge the duals WITHOUT building a graph (cheap memory) ---
+#     with torch.no_grad():
+#         for reg in schedule:
+#             f = update_f(g, reg)
+#             g = update_g(f, reg)
+
+#     # --- one final DIFFERENTIABLE update so gradients reach the inputs ---
+#     reg = schedule[-1]
+#     f = update_f(g, reg)
+#     g = update_g(f, reg)
+
+#     # --- final transport cost, chunked; padded columns contribute ~0 ---
+#     total = torch.zeros(B, device=x.device, dtype=x.dtype)
+#     for j0 in range(0, N, chunk_size):
+#         j1 = min(N, j0 + chunk_size)
+#         C = cost_block(j0, j1)
+#         log_P = (log_a.unsqueeze(2) + log_b[:, j0:j1].unsqueeze(1)
+#                  + (f.unsqueeze(2) + g[:, j0:j1].unsqueeze(1) - C) / reg)
+#         total = total + (log_P.exp() * C).sum(dim=(1, 2))
+#         del C, log_P
+
+#     return total.mean()
+
+
+def wd_loss(
+    x_hat,
+    x,
+    mask,
+    mask_logits=None,
+    n_clusters=64,
+    cap=256,
+    blur=0.01,
+    blur_start=None,
+    n_iter=25,
+    scaling=0.5,
+    eps=1e-8,
+):
+    """
+    Clustered entropic Wasserstein reconstruction loss for point clouds.
+
+    Points are assigned to real-cloud centroids by ABSOLUTE position, so a
+    globally-misplaced reconstructed point is penalized (unlike per-cluster
+    nearest-k gathering, which would erase global displacement). OT is then
+    solved within each cluster. Memory is bounded by (B * n_clusters * cap^2)
+    instead of (B * M * N), and the clustering makes the loss sensitive to
+    local densities.
+
+    x_hat:  (B, M, F)  reconstructed points
+    x:      (B, N, F)  real points
+    mask:        (B, N, 1) or (B, N)  real-point mask (1 keep, 0 pad)  [required]
+    mask_logits: (B, M) or (B, M, 1)  presence logits for x_hat (optional)
+    n_clusters:  number of centroids built from x
+    cap:         max points per cluster per cloud (overflow dropped by distance)
+    blur:        final entropic regularization (also the ground-cost scale)
+    blur_start:  starting reg for annealing (auto if None)
+    n_iter:      total Sinkhorn iterations
+    scaling:     geometric annealing factor in (0, 1)
+
+    Returns mean-over-live-groups entropic OT cost.
+    """
+    NEG = -1e4  # finite "log(0)" surrogate: safe under /reg and logsumexp
+
+    B, M, F = x_hat.shape
+    N = x.shape[1]
+
+    # ---- normalize input shapes ----
+    if mask.dim() == 3:
+        mask = mask.squeeze(-1)  # (B, N)
+    if mask_logits is not None and mask_logits.dim() == 3:
+        mask_logits = mask_logits.squeeze(-1)  # (B, M)
+
+    # ---- keep coordinates finite (padded slots may hold garbage) ----
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    x_hat = torch.nan_to_num(x_hat, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # ---- presence / validity weights ----
+    if mask_logits is not None:
+        w_hat = torch.sigmoid(mask_logits)  # (B, M)
+    else:
+        w_hat = torch.ones(B, M, device=x.device, dtype=x.dtype)
+    w_real = mask.to(x.dtype)  # (B, N); padded -> 0
+
+    # ---- build centroids from x (detached, sampled from valid points) ----
+    with torch.no_grad():
+        K = min(n_clusters, N)
+        probs = w_real + eps
+        probs = probs / probs.sum(1, keepdim=True)
+        seed = torch.multinomial(probs, K, replacement=True)  # (B, K)
+        centroids = torch.gather(
+            x, 1, seed.unsqueeze(-1).expand(-1, -1, F)
+        )  # (B, K, F)
+
+        # hard assignment by ABSOLUTE position
+        d_x = torch.cdist(x, centroids)  # (B, N, K)
+        d_hat = torch.cdist(x_hat, centroids)  # (B, M, K)
+        d_x = d_x.masked_fill(mask.unsqueeze(-1) == 0, 1e9)
+        asg_x = d_x.argmin(-1)  # (B, N)
+        asg_hat = d_hat.argmin(-1)  # (B, M)
+
+    # ---- pack each (batch, cluster) into a fixed-capacity slate ----
+    # Overflow beyond `cap` is dropped, keeping the points closest to the
+    # centroid. Dropped / empty slots carry zero weight.
+    def pack(pts, w_pts, asg, dist):
+        P = pts.shape[1]
+        # distance of each point to its assigned centroid
+        d_self = torch.gather(dist, 2, asg.unsqueeze(-1)).squeeze(-1)  # (B,P)
+        # composite sort key: group first, then distance within group
+        span = (d_self.max() + 1.0).detach()
+        key = asg.to(pts.dtype) * span + d_self  # (B,P)
+        order = key.argsort(dim=1)  # (B,P)
+
+        asg_s = torch.gather(asg, 1, order)  # (B,P)
+        w_s = torch.gather(w_pts, 1, order)  # (B,P)
+        pts_s = torch.gather(pts, 1, order.unsqueeze(-1).expand(-1, -1, F))
+
+        # rank within each cluster via per-cluster cumulative count
+        onehot = torch.zeros(B, P, K, device=pts.device, dtype=pts.dtype)
+        onehot.scatter_(2, asg_s.unsqueeze(-1), 1.0)
+        rank = onehot.cumsum(1) - 1  # (B,P,K)
+        rank = torch.gather(rank, 2, asg_s.unsqueeze(-1)).squeeze(-1).long()
+        keep = rank < cap  # (B,P)
+        rank = rank.clamp(max=cap - 1)
+
+        slate = torch.zeros(B, K, cap, F, device=pts.device, dtype=pts.dtype)
+        wt = torch.zeros(B, K, cap, device=pts.device, dtype=pts.dtype)
+        bidx = torch.arange(B, device=pts.device).view(B, 1).expand(B, P)
+
+        w_eff = w_s * keep.to(w_s.dtype)  # zero-weight the dropped overflow
+        slate[bidx, asg_s, rank] = pts_s
+        wt[bidx, asg_s, rank] = w_eff
+        return slate.reshape(B * K, cap, F), wt.reshape(B * K, cap)
+
+    Xr, Wr = pack(x, w_real, asg_x, d_x)  # (G, cap, F), (G, cap)
+    Xh, Wh = pack(x_hat, w_hat, asg_hat, d_hat)
+
+    # ---- normalize to probability measures per group ----
+    # groups with zero total weight are "dead"; give them a dummy uniform
+    # measure so arithmetic stays finite, then exclude them from the mean.
+    sum_r = Wr.sum(1, keepdim=True)
+    sum_h = Wh.sum(1, keepdim=True)
+    live = (sum_r.squeeze(1) > 0) & (sum_h.squeeze(1) > 0)  # (G,)
+
+    a = Wh / (sum_h + eps)  # source = reconstruction
+    b = Wr / (sum_r + eps)  # target = real
+
+    pad_a = Wh == 0
+    pad_b = Wr == 0
+
+    log_a = torch.log(a + eps).masked_fill(pad_a, NEG)
+    log_b = torch.log(b + eps).masked_fill(pad_b, NEG)
+
+    # ---- ground cost within each group (p=1 Euclidean) ----
+    C = torch.cdist(Xh, Xr) + 1e-12  # (G,cap,cap)
+    C = torch.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # ---- epsilon-annealing schedule ----
+    eps_final = max(blur, eps)
+    if blur_start is None:
+        with torch.no_grad():
+            cmax = C.amax().item()
+            if not (cmax == cmax) or cmax <= 0:  # NaN or nonpositive guard
+                cmax = 1.0
+        eps_start = max(eps_final, cmax * 0.5)
+    else:
+        eps_start = max(eps_final, blur_start)
+
+    sched, e = [], eps_start
+    if 0.0 < scaling < 1.0:
+        while e > eps_final:
+            sched.append(e)
+            e *= scaling
+    sched.append(eps_final)
+    if len(sched) < n_iter:
+        sched += [eps_final] * (n_iter - len(sched))
+    else:
+        sched = sched[:n_iter]
+
+    # ---- log-domain Sinkhorn duals ----
+    f = torch.zeros_like(log_a)
+    g = torch.zeros_like(log_b)
+
+    def step(reg):
+        nonlocal f, g
+        # f_i = -reg * logsumexp_j ( log_b_j + (g_j - C_ij)/reg )
+        f = -reg * torch.logsumexp(
+            log_b.unsqueeze(1) + (g.unsqueeze(1) - C) / reg, dim=2
+        )
+        # padded source slots have zero mass -> dual is irrelevant; pin it to 0
+        # so a fully-padded logsumexp can never blow up the next half-step.
+        f = f.masked_fill(pad_a, 0.0).clamp(-1e4, 1e4)
+
+        # g_j = -reg * logsumexp_i ( log_a_i + (f_i - C_ij)/reg )
+        g = -reg * torch.logsumexp(
+            log_a.unsqueeze(2) + (f.unsqueeze(2) - C) / reg, dim=1
+        )
+        g = g.masked_fill(pad_b, 0.0).clamp(-1e4, 1e4)
+
+    # converge duals without building a graph (memory-cheap)
+    with torch.no_grad():
+        for reg in sched:
+            step(reg)
+
+    # one final DIFFERENTIABLE update so gradients reach the inputs
+    reg = sched[-1]
+    step(reg)
+
+    # ---- transport plan and cost ----
+    log_P = (
+        log_a.unsqueeze(2)
+        + log_b.unsqueeze(1)
+        + (f.unsqueeze(2) + g.unsqueeze(1) - C) / reg
+    )  # (G,cap,cap)
+    # dead groups: force ~zero transported mass so they contribute nothing
+    log_P = log_P.masked_fill(~live.view(-1, 1, 1), NEG)
+
+    P = log_P.exp()
+    P = torch.nan_to_num(P, nan=0.0, posinf=0.0, neginf=0.0)
+    cost = (P * C).sum(dim=(1, 2))  # (G,)
+
+    cost = cost * live.to(cost.dtype)
+    denom = live.to(cost.dtype).sum().clamp_min(1.0)
+    loss = cost.sum() / denom
+
+    # final belt-and-suspenders guard
+    loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+    return loss
+
+
+def emd_loss(
+    x_hat,
+    x,
+    mask,
+    mask_logits,
+    R=0.8,
+    blur=0.015,
+    blur_start=None,
+    n_iter=100,
+    n_iter_self=None,
+    scaling=0.5,
+    eps=1e-8,
+):
+    """
+    Debiased Sinkhorn-divergence EMD loss with presence gating. No deps.
+
+    x_hat:       (B, M, F) reconstructed particles
+    x:           (B, N, F) real particles
+    mask:        (B, N, 1) real-particle mask for x (1 = keep, 0 = padded)
+    mask_logits: (B, M)    predicted presence logits for x_hat slots
+    features assumed ordered (eta, phi, log pT, log E)
+
+    Ground cost: Euclidean distance in (eta, phi)/R  (~ dR),  p=1.
+
+    Returns mean over batch of:
+        Sinkhorn divergence  S(a,b) = OT(a,b)
+    """
+    mask = mask.squeeze(-1)  # (B, N)
+    p_hat = torch.sigmoid(mask_logits)  # (B, M)
+
+    pos_hat = x_hat[..., 0:2] / R  # (B, M, 2)
+    pos = x[..., 0:2] / R  # (B, N, 2)
+
+    w_hat = x_hat[..., 2].exp() * p_hat  # (B, M)
+    w = x[..., 2].exp() * mask  # (B, N)
+
+    # --- normalize to probability measures (balanced OT) ---
+    a = w_hat / (w_hat.sum(dim=1).unsqueeze(1) + eps)  # (B, M)
+    b = w / (w.sum(dim=1).unsqueeze(1) + eps)  # (B, N)
+
+    # --- cost matrices (p=1 Euclidean in (eta,phi)/R) ---
+    C_ab = torch.cdist(pos_hat, pos, p=2)  # (B, M, N)
+
+    # --- log-domain measures; hard-mask padded real particles ---
+    log_a = torch.log(a + eps)  # (B, M)
+    log_b = torch.log(b + eps)  # (B, N)
+    log_b = log_b.masked_fill(mask == 0, -1e9)  # (B, N)
+
+    # --- epsilon annealing schedule (multiscale), shared across solves ---
+    eps_final = blur
+    if blur_start is None:
+        cmax = C_ab.detach().max().item()
+        eps_start = max(blur, cmax * 0.5 + eps)
+    else:
+        eps_start = max(blur, blur_start)
+
+    def make_schedule(n):
+        if scaling <= 0 or scaling >= 1:
+            return [eps_final] * n
+        sched, e = [], eps_start
+        while e > eps_final:
+            sched.append(e)
+            e *= scaling
+        sched.append(eps_final)
+        if len(sched) < n:
+            sched += [eps_final] * (n - len(sched))
+        else:
+            sched = sched[:n]
+        return sched
+
+    schedule = make_schedule(n_iter)
+
+    def sinkhorn_cost(log_p, log_q, C, sched):
+        """Log-domain Sinkhorn; returns entropic OT cost <P, C> per batch."""
+        f = torch.zeros_like(log_p)  # dual for rows
+        g = torch.zeros_like(log_q)  # dual for cols
+        for reg in sched:
+            M_g = (g.unsqueeze(1) - C) / reg  # (B, |p|, |q|)
+            f = -reg * torch.logsumexp(log_q.unsqueeze(1) + M_g, dim=2)
+            M_f = (f.unsqueeze(2) - C) / reg  # (B, |p|, |q|)
+            g = -reg * torch.logsumexp(log_p.unsqueeze(2) + M_f, dim=1)
+        reg = sched[-1]
+        log_P = (
+            log_p.unsqueeze(2)
+            + log_q.unsqueeze(1)
+            + (f.unsqueeze(2) + g.unsqueeze(1) - C) / reg
+        )
+        P = log_P.exp()
+        return (P * C).sum(dim=(1, 2))  # (B,)
+
+    loss = sinkhorn_cost(log_a, log_b, C_ab, schedule)  # (B,)
+    return loss.mean()
+
+
+def chamfer_loss(x_hat, x, mask):
+    """
+    x_hat: (B, M, F) reconstructed/generated particles
+    x:     (B, N, F) real particles
+    mask:  (B, N, 1) real-particle mask for x
+    """
+
+    mask = mask.squeeze(-1).bool()
+
+    # pairwise squared distances: (B, M, N)
+    dist = torch.cdist(x_hat, x) ** 2
+
+    # ignore padded real particles
+    dist = dist.masked_fill(~mask[:, None, :], float("inf"))
+
+    # each generated point should match some real point
+    loss_hat_to_x = dist.min(dim=2).values.mean()
+
+    # each real point should be matched by some generated point
+    loss_x_to_hat = dist.min(dim=1).values
+    loss_x_to_hat = loss_x_to_hat[mask].mean()
+
+    return loss_hat_to_x + loss_x_to_hat
+
+
 def get_loss(
     outputs,
     y,
@@ -222,13 +701,21 @@ def get_loss(
             loss_class = torch.mean(class_cost(outputs["y_pred"], y))
             logs["loss_class"] += loss_class.detach()
         else:
-            counts = torch.bincount(y, minlength=outputs["y_pred"].shape[-1]).float()
+            counts = torch.bincount(
+                y.int(), minlength=outputs["y_pred"].shape[-1]
+            ).float()
             class_weights = 1.0 / (counts + 1e-6)
-            weights = class_weights[y]
+            weights = class_weights[y.int()]
             weights = weights / weights.mean()
 
             loss_class = get_class_loss(
-                weights, outputs["y_pred"], y, class_cost, use_event_loss, logs
+                # torch.ones_like(y),
+                weights,
+                outputs["y_pred"],
+                y.long(),
+                class_cost,
+                use_event_loss,
+                logs,
             )
 
         loss = loss + loss_class
@@ -264,13 +751,32 @@ def get_loss(
         loss = loss + loss_gen
 
     if outputs["y_perturb"] is not None and data_pid is None:
-        counts = torch.bincount(y, minlength=outputs["y_pred"].shape[-1]).float()
+        counts = torch.bincount(y.int(), minlength=outputs["y_pred"].shape[-1]).float()
         class_weights = 1.0 / (counts + 1e-6)
-        weights = class_weights[y]
+        weights = class_weights[y.int()]
         weights = outputs["alpha"].squeeze() * weights / weights.mean()
         loss = loss + get_class_loss(
-            weights, outputs["y_perturb"], y, class_cost, use_event_loss, logs
+            weights, outputs["y_perturb"], y.long(), class_cost, use_event_loss, logs
         )
+
+    if outputs["x_hat"] is not None:
+        target_mask = (outputs["x"][..., 2:3] != 0).float()
+        if outputs["x"].shape[1] > 200:
+            loss_ot = wd_loss(
+                outputs["x_hat"], outputs["x"], target_mask, outputs["mask_logits"]
+            )
+        else:
+            loss_ot = emd_loss(
+                outputs["x_hat"], outputs["x"], target_mask, outputs["mask_logits"]
+            )
+
+        loss_mask = F.binary_cross_entropy_with_logits(
+            outputs["mask_logits"],
+            target_mask.squeeze(-1),
+        )
+        loss_ae = loss_ot + loss_mask
+        logs["loss_ae"] += loss_ae.detach()
+        loss = loss + loss_ae
 
     if use_clip and outputs["z_body"] is not None and outputs["x_body"] is not None:
         loss_clip = clip_loss(
@@ -383,21 +889,34 @@ def restore_checkpoint(
     else:
 
         def filter_partial_model(state, model_state, is_main_node=False):
-            filtered_state = {}
+            filtered = {}
+
             for k, v in state.items():
                 if "out." in k:
                     if is_main_node:
-                        print(f"Skipping {k}: explicitly excluded from loading")
-                    continue
-
-                if k in model_state and model_state[k].shape == v.shape:
-                    filtered_state[k] = v
-                else:
+                        print(f"Skipping {k}: explicitly excluded")
+                elif k not in model_state:
                     if is_main_node:
-                        print(
-                            f"Skipping {k}: shape mismatch (checkpoint: {v.shape}, model: {model_state[k].shape if k in model_state else 'missing'})"
-                        )
-            return filtered_state
+                        print(f"Skipping {k}: not present in new model")
+                elif v.shape != model_state[k].shape:
+                    if is_main_node:
+                        print(f"Skipping {k}: {v.shape} -> {model_state[k].shape}")
+                else:
+                    filtered[k] = v
+
+            if is_main_node:
+                for k in model_state.keys() - filtered.keys():
+                    if k not in state:
+                        print(f"Random {k}: not present in checkpoint")
+
+                total = sum(v.numel() for v in model_state.values())
+                loaded = sum(model_state[k].numel() for k in filtered)
+                print(f"Loaded: {loaded:,}/{total:,} ({100 * loaded / total:.2f}%)")
+                print(
+                    f"Random: {total - loaded:,}/{total:,} ({100 * (total - loaded) / total:.2f}%)"
+                )
+
+            return filtered
 
         if base_model.body is not None and "body" in checkpoint:
             filtered_state = filter_partial_model(
