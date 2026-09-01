@@ -45,6 +45,11 @@ class PET2(nn.Module):
         K=15,
         skip=False,
         num_coord=3,
+        use_local=True,
+        use_attn=True,
+        num_particles=150,
+        num_latent=10,
+        dataset="top",
     ):
         super().__init__()
         self.mode = mode
@@ -55,9 +60,11 @@ class PET2(nn.Module):
             "segmentation",
             "ftag",
             "pretrain",
+            "encoder",
         ]:
             raise ValueError(f"Mode '{self.mode}' not supported.")
-
+        self.dataset = dataset
+        self.cond_dim = cond_dim
         self.body = PET_body(
             input_dim,
             base_dim,
@@ -84,6 +91,8 @@ class PET2(nn.Module):
             use_time=self.mode in ["generator", "pretrain"],
             skip=skip,
             num_coord=num_coord,
+            use_local=use_local,
+            use_attn=use_attn,
         )
 
         self.num_add = self.body.num_add
@@ -91,8 +100,20 @@ class PET2(nn.Module):
         self.classifier = None
         self.generator = None
 
-        use_classifier = self.mode in ["classifier", "ftag", "regression", "pretrain"]
-        use_generator = self.mode in ["generator", "segmentation", "ftag", "pretrain"]
+        use_classifier = self.mode in [
+            "classifier",
+            "ftag",
+            "regression",
+            "pretrain",
+            "encoder",
+        ]
+        use_generator = self.mode in [
+            "generator",
+            "segmentation",
+            "ftag",
+            "pretrain",
+        ]
+
         if use_classifier:
             self.classifier = PET_classifier(
                 base_dim,
@@ -104,7 +125,8 @@ class PET2(nn.Module):
                 mlp_drop=mlp_drop,
                 attn_drop=attn_drop,
                 num_tokens=num_tokens,
-                num_classes=num_classes,
+                num_classes=num_classes if self.mode != "encoder" else num_latent,
+                use_attn=use_attn,
             )
 
         if use_generator:
@@ -124,7 +146,27 @@ class PET2(nn.Module):
                 num_add=self.num_add,
                 num_classes=num_classes,
                 skip_pid=(num_classes == 1) | (self.mode == "segmentation"),
+                use_attn=use_attn,
             )
+
+        if self.mode == "encoder":
+            self.decoder = PET_decoder(
+                num_latent,
+                base_dim,
+                num_particles=num_particles,
+                num_features=input_dim,
+                num_transformers=num_transformers_head,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                mlp_drop=mlp_drop,
+                attn_drop=attn_drop,
+                num_classes=num_classes,
+                skip_pid=(num_classes == 1),
+                # (num_classes == 1),
+            )
+            self.encoder_norm = nn.LayerNorm(num_latent)
 
         self.initialize_weights()
 
@@ -142,23 +184,26 @@ class PET2(nn.Module):
         return {"norm", "token"}
 
     def forward(self, x, y, cond=None, pid=None, add_info=None):
-        y_pred, y_perturb, z_pred, v, v_weight, x_body, z_body = (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        (
+            y_pred,
+            y_perturb,
+            z_pred,
+            v,
+            v_weight,
+            x_body,
+            z_body,
+            x_hat,
+            mask_logits,
+            latent,
+        ) = (None, None, None, None, None, None, None, None, None, None)
 
         time = torch.rand(size=(x.shape[0],)).to(x.device)
         _, alpha, sigma = get_logsnr_alpha_sigma(time)
 
         if self.mode in ["generator", "pretrain"]:
-            z, v, v_weight = perturb(x, time)
+            z, v, v_weight = perturb(x, time, self.dataset)
             z_body = self.body(z, cond, pid, add_info, time)
-            z_pred = self.generator(z_body, y)
+            z_pred = self.generator(z_body, y.int())
 
         if self.mode in [
             "classifier",
@@ -166,6 +211,7 @@ class PET2(nn.Module):
             "segmentation",
             "pretrain",
             "ftag",
+            "encoder",
         ]:
             x_body = self.body(x, cond, pid, add_info, torch.zeros_like(time))
 
@@ -173,6 +219,9 @@ class PET2(nn.Module):
                 y_pred = self.classifier(x_body)
             if self.mode == "pretrain":
                 y_perturb = self.classifier(z_body)
+            if self.mode == "encoder":
+                latent = self.encoder_norm(self.classifier(x_body))
+                x_hat, mask_logits = self.decoder(latent, y.int())
             if self.mode == "ftag" or self.mode == "segmentation":
                 z_pred = self.generator(x_body, y)
 
@@ -185,7 +234,126 @@ class PET2(nn.Module):
             "x_body": x_body,
             "z_body": z_body,
             "alpha": alpha**2,
+            "x_hat": x_hat,
+            "x": x,
+            "mask_logits": mask_logits,
+            "latent": latent,
         }
+
+
+class PET_decoder(nn.Module):
+    def __init__(
+        self,
+        input_dim,
+        base_dim,
+        num_particles,
+        num_features,
+        num_transformers=2,
+        num_heads=4,
+        mlp_ratio=2,
+        norm_layer=DynamicTanh,
+        act_layer=nn.GELU,
+        mlp_drop=0.1,
+        attn_drop=0.1,
+        num_context_tokens=4,
+        num_classes=2,
+        skip_pid=False,
+    ):
+        super().__init__()
+
+        self.base_dim = base_dim
+        self.input_dim = input_dim
+        self.num_particles = num_particles
+        self.num_features = num_features
+        self.num_context_tokens = num_context_tokens
+        self.skip_pid = skip_pid
+
+        if not self.skip_pid:
+            self.pid_embed = nn.Sequential(
+                nn.Embedding(num_classes, base_dim),
+                MLP(
+                    base_dim,
+                    int(mlp_ratio * base_dim),
+                    out_features=base_dim,
+                    act_layer=act_layer,
+                    drop=mlp_drop,
+                ),
+            )
+
+        self.input_proj = nn.Linear(
+            input_dim,
+            num_context_tokens * base_dim,
+        )
+
+        self.particle_queries = nn.Parameter(torch.zeros(1, num_particles, base_dim))
+
+        self.in_blocks = nn.ModuleList(
+            [
+                TokenAttBlock(
+                    dim=base_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    attn_drop=attn_drop,
+                    mlp_drop=mlp_drop,
+                    act_layer=act_layer,
+                    norm_layer=norm_layer,
+                    num_tokens=num_particles,
+                    skip=False,
+                )
+                for _ in range(num_transformers)
+            ]
+        )
+
+        self.fc = MLP(
+            base_dim,
+            int(mlp_ratio * base_dim),
+            act_layer=act_layer,
+            drop=mlp_drop,
+            norm_layer=norm_layer,
+        )
+
+        self.out = nn.Linear(base_dim, num_features)
+        self.mask_out = nn.Linear(base_dim, 1)
+
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        def _init_weights(m):
+            if isinstance(m, nn.Linear):
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        self.apply(_init_weights)
+        nn.init.normal_(self.particle_queries, std=0.02)
+
+    def forward(self, c, y=None):
+        B = c.shape[0]
+
+        context = self.input_proj(c)
+        context = context.reshape(
+            B,
+            self.num_context_tokens,
+            self.base_dim,
+        )
+
+        if not self.skip_pid and y is not None:
+            x = torch.cat([self.pid_embed(y).unsqueeze(1), context], 1)
+
+        particles = self.particle_queries.expand(B, -1, -1)
+
+        # particle tokens first, because TokenAttBlock updates first num_tokens
+        x = torch.cat([particles, context], dim=1)
+
+        for blk in self.in_blocks:
+            x = blk(x)
+
+        x = x[:, : self.num_particles]
+        x = self.fc(x)
+
+        x_hat = self.out(x)
+        mask_logits = self.mask_out(x).squeeze(-1)
+
+        return x_hat, mask_logits
 
 
 class PET_classifier(nn.Module):
@@ -201,6 +369,7 @@ class PET_classifier(nn.Module):
         attn_drop=0.1,
         num_tokens=4,
         num_classes=2,
+        use_attn=True,
     ):
         super().__init__()
         self.num_tokens = num_tokens
@@ -217,6 +386,7 @@ class PET_classifier(nn.Module):
                     norm_layer=norm_layer,
                     num_tokens=self.num_tokens,
                     skip=False,
+                    use_attn=use_attn,
                 )
                 for _ in range(num_transformers)
             ]
@@ -245,6 +415,7 @@ class PET_classifier(nn.Module):
     def forward(self, x):
         B = x.shape[0]
         mask = x[:, self.num_tokens :, 2:3] != 0
+
         for ib, blk in enumerate(self.in_blocks):
             x = blk(x, mask=mask)
 
@@ -268,6 +439,7 @@ class PET_generator(nn.Module):
         num_add=1,
         num_classes=2,
         skip_pid=False,
+        use_attn=True,
     ):
         super().__init__()
         self.num_tokens = num_tokens
@@ -301,6 +473,7 @@ class PET_generator(nn.Module):
                     num_tokens=num_tokens,
                     skip=False,
                     use_int=False,
+                    use_attn=use_attn,
                 )
                 for _ in range(num_transformers)
             ]
@@ -341,6 +514,7 @@ class PET_generator(nn.Module):
             self.fc(x[:, self.num_add + self.num_tokens :])
             * mask[:, self.num_add + self.num_tokens :]
         )
+
         return self.out(x) * mask[:, self.num_add + self.num_tokens :]
 
 
@@ -372,11 +546,14 @@ class PET_body(nn.Module):
         use_time=False,
         skip=False,
         num_coord=3,
+        use_local=True,
+        use_attn=True,
     ):
         super().__init__()
         self.input_dim = input_dim
         self.use_int = use_int
         self.use_time = use_time
+        self.use_local = use_local
         self.conditional = conditional
         self.pid = pid
         self.add_info = add_info
@@ -401,21 +578,25 @@ class PET_body(nn.Module):
                 feature_drop=feature_drop,
             )
 
-        self.local_physics = LocalEmbeddingBlock(
-            in_features=input_dim,
-            hidden_features=mlp_ratio * base_dim,
-            out_features=base_dim,
-            act_layer=act_layer,
-            mlp_drop=mlp_drop,
-            attn_drop=attn_drop,
-            norm_layer=norm_layer,
-            K=K,
-            num_heads=num_heads,
-            local_int=local_int,
-            int_type=int_type,
-            num_transformers=num_transf_local,
-            feature_drop=feature_drop,
-        )
+        if self.use_local:
+            self.local_physics = LocalEmbeddingBlock(
+                in_features=input_dim,
+                hidden_features=mlp_ratio * base_dim,
+                out_features=base_dim,
+                act_layer=act_layer,
+                mlp_drop=mlp_drop,
+                attn_drop=attn_drop,
+                norm_layer=norm_layer,
+                K=K,
+                num_heads=num_heads,
+                local_int=local_int,
+                int_type=int_type,
+                num_transformers=num_transf_local,
+                feature_drop=feature_drop,
+            )
+            self.local_drop = (
+                NoScaleDropout(feature_drop) if feature_drop > 0.0 else nn.Identity()
+            )
 
         self.num_add = 0
         if self.conditional:
@@ -547,18 +728,21 @@ class PET_body(nn.Module):
 
         # Move away zero-padded entries
         coord_shift = 999.0 * (~mask).float()
-        local_features, indices = self.local_physics(
-            coord_shift + x[:, :, : self.num_coord], x, mask
-        )
+        if self.use_local:
+            local_features, indices = self.local_physics(
+                coord_shift + x[:, :, : self.num_coord], x, mask
+            )
 
         x_int = None
         if self.use_int:
             x_int = self.interaction(x, mask, indices)
 
-        # Combine local + global info
-        x = x_embed + local_features
-        # Add classification tokens
+        x = x_embed
+        if self.use_local:
+            # Combine local + global info
+            x = x + self.local_drop(local_features)
 
+        # Add classification tokens
         if pid is not None and self.pid:
             # Encode the PID info
             x = x + self.pid_embed(pid) * mask

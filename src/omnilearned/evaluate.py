@@ -11,7 +11,7 @@ from omnilearned.utils import (
     pad_array,
     get_model_parameters,
 )
-from omnilearned.diffusion import generate
+from omnilearned.diffusion import generate, estimate_max_logp
 import os
 import numpy as np
 import h5py
@@ -31,8 +31,11 @@ def eval_model(
     outdir="",
     save_tag="pretrain",
     rank=0,
+    sbi=False,
 ):
-    prediction, cond, labels = test_step(model, test_loader, mode, device)
+    prediction, cond, labels = test_step(
+        model, test_loader, mode, device, sbi=sbi, dataset=dataset
+    )
 
     if mode in ["classifier", "regression", "segmentation"]:
         if use_event_loss:
@@ -62,15 +65,10 @@ def eval_model(
         ) as fh5:
             fh5.create_dataset("data", data=prediction.cpu().numpy())
             fh5.create_dataset("global", data=cond.cpu().numpy())
-            fh5.create_dataset("pid", data=labels.cpu().numpy() + 1)
+            fh5.create_dataset("pid", data=labels.cpu().numpy())
 
 
-def test_step(
-    model,
-    dataloader,
-    mode,
-    device,
-):
+def test_step(model, dataloader, mode, device, sbi=False, dataset="top"):
     model.eval()
 
     preds = []
@@ -96,35 +94,75 @@ def test_step(
                 output_name = (
                     "y_pred" if mode in ["classifier", "regression"] else "z_pred"
                 )
-                preds.append(outputs[output_name])
 
-            elif mode == "generator":
+                preds.append(outputs[output_name].detach().cpu())
+                # preds.append(torch.zeros_like(y))
+
+            elif mode == "encoder":
+                outputs = model(X, y, **model_kwargs)
+                batch["cond"] = torch.cat(
+                    [outputs["latent"], batch["cond"].to(device)], -1
+                )
+                preds.append(X.detach().cpu())
+
+            elif mode in ["generator"]:
                 assert "cond" in model_kwargs, (
                     "ERROR, conditioning variables not passed to model"
                 )
-                preds.append(generate(model, y, X.shape, **model_kwargs))
-        if mode == "segmentation":
-            labels.append(batch["data_pid"].to(device))
-        else:
-            labels.append(y)
+                mult = model_kwargs["cond"][:, -1]
+                if sbi:
+                    preds.append(
+                        estimate_max_logp(
+                            model,
+                            X,
+                            y,
+                            **model_kwargs,
+                            multiplicity=mult,
+                            scan_ranges=[(6.5, 7.3), (4.5, 5.5)],
+                            scan_points=30,
+                        )["theta"]
+                        .detach()
+                        .cpu()
+                    )
+                else:
+                    preds.append(
+                        generate(
+                            model,
+                            y,
+                            X.shape,
+                            **model_kwargs,
+                            multiplicity=mult,
+                            dataset=dataset,
+                        )
+                        .detach()
+                        .cpu()
+                    )
 
-        conds.append(batch["cond"])
-        if mode == "generator":
+        if mode == "segmentation":
+            labels.append(batch["data_pid"].detach().cpu())
+        else:
+            labels.append(y.detach().cpu())
+
+        conds.append(
+            batch["cond"].detach().cpu() if batch["cond"] is not None else None
+        )
+
+        if mode in ["generator", "encoder"] and not sbi:
             if batch["pid"] is not None:
                 preds[-1] = torch.cat(
-                    [preds[-1], model_kwargs["pid"].unsqueeze(-1).float()], -1
+                    [preds[-1], model_kwargs["pid"].unsqueeze(-1).float().cpu()], -1
                 )
             if batch["add_info"] is not None:
-                preds[-1] = torch.cat([preds[-1], model_kwargs["add_info"]], -1)
+                preds[-1] = torch.cat([preds[-1], model_kwargs["add_info"].cpu()], -1)
 
-    if mode == "generator":
+    if mode in ["generator", "encoder"] and not sbi:
         preds = pad_array(preds, npart)
     else:
-        preds = torch.cat(preds).to(device)
+        preds = torch.cat(preds)
     return (
         preds,
-        torch.cat(conds).to(device) if conds[0] is not None else None,
-        torch.cat(labels).to(device),
+        torch.cat(conds) if conds[0] is not None else None,
+        torch.cat(labels),
     )
 
 
@@ -135,6 +173,8 @@ def run(
     dataset: str = "top",
     path: str = "/pscratch/sd/v/vmikuni/datasets",
     num_feat: int = 4,
+    num_part: int = 150,
+    num_latent: int = 10,
     model_size: str = "small",
     interaction: bool = False,
     local_interaction: bool = False,
@@ -145,12 +185,14 @@ def run(
     num_cond: int = 3,
     use_pid: bool = False,
     pid_idx: int = -1,
+    pid_dim: int = 9,
     use_add: bool = False,
     num_add: int = 4,
     use_event_loss: bool = False,
     num_classes: int = 2,
     num_gen_classes: int = 1,
     mode: str = "classifier",
+    sbi: bool = False,
     batch: int = 64,
     num_workers: int = 16,
     clip_inputs: bool = False,
@@ -168,6 +210,7 @@ def run(
         conditional=conditional,
         cond_dim=num_cond,
         pid=use_pid,
+        pid_dim=pid_dim,
         add_info=use_add,
         add_dim=num_add,
         mode=mode,
@@ -175,6 +218,8 @@ def run(
         num_gen_classes=num_gen_classes,
         num_coord=num_coord,
         K=K,
+        num_particles=num_part,
+        num_latent=num_latent,
         **model_params,
     )
 
@@ -223,7 +268,7 @@ def run(
             get_checkpoint_name(save_tag),
             local_rank,
             is_main_node=is_master_node(),
-            restore_ema_model=mode == "generator",
+            restore_ema_model=mode in ["generator"],
         )
 
     else:
@@ -256,6 +301,7 @@ def run(
         rank=rank,
         outdir=outdir,
         save_tag=save_tag,
+        sbi=sbi,
     )
     dist.barrier()
     dist.destroy_process_group()

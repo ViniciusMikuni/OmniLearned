@@ -6,7 +6,7 @@ from omnilearned.network import PET2
 from omnilearned.dataloader import load_data
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from pytorch_optimizer import Lion
+from pytorch_optimizer import Lion, Ranger21
 from diffusers.optimization import get_cosine_schedule_with_warmup
 
 from omnilearned.utils import (
@@ -31,13 +31,14 @@ torch._dynamo.config.verbose = False
 
 
 def get_logs(device):
-    logs_buff = torch.zeros((5), dtype=torch.float32, device=device)
+    logs_buff = torch.zeros((6), dtype=torch.float32, device=device)
     logs = {}
     logs["loss"] = logs_buff[0].view(-1)
     logs["loss_class"] = logs_buff[1].view(-1)
     logs["loss_gen"] = logs_buff[2].view(-1)
     logs["loss_clip"] = logs_buff[3].view(-1)
     logs["loss_class_event"] = logs_buff[4].view(-1)
+    logs["loss_ae"] = logs_buff[5].view(-1)
     return logs
 
 
@@ -76,13 +77,15 @@ def train_step(
             batch = next(data_iter)
 
         # for batch_idx, batch in enumerate(dataloader):
-        optimizer.zero_grad()  # Zero the gradients
+        optimizer.zero_grad(set_to_none=True)  # Zero the gradients
 
-        X, y = batch["X"].to(device, dtype=torch.float), batch["y"].to(device)
+        X = batch["X"].to(device, dtype=torch.float32)
+        y = batch["y"].to(device)
+
         model_kwargs = {
-            key: (batch[key].to(device) if batch[key] is not None else None)
+            key: batch[key].to(device)
             for key in ["cond", "pid", "add_info"]
-            if key in batch
+            if key in batch and batch[key] is not None
         }
 
         if batch.get("data_pid") is not None:
@@ -162,16 +165,17 @@ def val_step(
             data_iter = iter(dataloader)
             batch = next(data_iter)
 
-        # for batch_idx, batch in enumerate(dataloader):
-        X, y = batch["X"].to(device, dtype=torch.float), batch["y"].to(device)
+        X = batch["X"].to(device, dtype=torch.float32, non_blocking=True)
+        y = batch["y"].to(device, non_blocking=True)
+
         model_kwargs = {
-            key: (batch[key].to(device) if batch[key] is not None else None)
+            key: batch[key].to(device, non_blocking=True)
             for key in ["cond", "pid", "add_info"]
-            if key in batch
+            if key in batch and batch[key] is not None
         }
 
         if batch.get("data_pid") is not None:
-            data_pid = batch["data_pid"].to(device)
+            data_pid = batch["data_pid"].to(device, non_blocking=True)
         else:
             data_pid = None
 
@@ -291,6 +295,10 @@ def train_model(
                 print(
                     f"CLIP loss: {train_logs['loss_clip']:.4f}, CLIP Val Loss: {val_logs['loss_clip']:.4f}"
                 )
+            if mode == "encoder":
+                print(
+                    f"AE loss: {train_logs['loss_ae']:.4f}, AE Val Loss: {val_logs['loss_ae']:.4f}"
+                )
             print(
                 "Time taken for epoch {} is {} sec".format(epoch, time.time() - start)
             )
@@ -338,8 +346,11 @@ def run(
     path: str = "/pscratch/sd/v/vmikuni/datasets",
     wandb=False,
     fine_tune: bool = False,
+    freeze: bool = False,
     resuming: bool = False,
     num_feat: int = 4,
+    num_part: int = 150,
+    num_latent: int = 10,
     model_size: str = "small",
     interaction: bool = False,
     local_interaction: bool = False,
@@ -401,6 +412,9 @@ def run(
         feature_drop=feature_drop,
         num_coord=num_coord,
         K=K,
+        num_particles=num_part,
+        num_latent=num_latent,
+        dataset=dataset,
         **model_params,
     )
 
@@ -439,7 +453,7 @@ def run(
 
     val_loader = load_data(
         dataset,
-        dataset_type="val",
+        dataset_type="test",
         use_cond=conditional,
         use_pid=use_pid,
         pid_idx=pid_idx,
@@ -455,10 +469,10 @@ def run(
     )
 
     param_groups = get_param_groups(
-        model, wd, lr, lr_factor=lr_factor, fine_tune=fine_tune
+        model, wd, lr, lr_factor=lr_factor, fine_tune=fine_tune, freeze=freeze
     )
 
-    if optim not in ["adam", "lion"]:
+    if optim not in ["adam", "lion", "ranger"]:
         raise ValueError(
             f"Optimizer '{optim}' not supported. Choose from adam or lion."
         )
@@ -471,6 +485,8 @@ def run(
         optimizer = Lion(param_groups, betas=(b1, b2))
     elif optim == "adam":
         optimizer = torch.optim.AdamW(param_groups)
+    elif optim == "ranger":
+        optimizer = Ranger21(param_groups, num_iterations=(len(train_loader) * epoch))
 
     train_steps = len(train_loader) if iterations < 0 else iterations
 
@@ -549,7 +565,7 @@ def run(
 
         run = wandb.init(
             # Set the project where this run will be logged
-            project="OmniBoone",
+            project="OmniCosmosv2",
             name=save_tag,
             mode=mode_wandb,
             # Track hyperparameters and run metadata
