@@ -500,9 +500,11 @@ class PET_generator(nn.Module):
 
         self.apply(_init_weights)
 
-    def forward(self, x, y=None):
-        # Add tokens and label embedding
-        mask = x[:, :, 2:3] != 0
+    def forward(self, x, y=None, mask=None):
+        # Add tokens and label embedding. An explicit mask [B, M, 1] covering
+        # tokens and particles replaces the value-derived mask when given.
+        if mask is None:
+            mask = x[:, :, 2:3] != 0
 
         if not self.skip_pid and y is not None:
             mask = torch.cat([torch.ones_like(mask[:, :1]), mask], 1)
@@ -719,9 +721,16 @@ class PET_body(nn.Module):
 
         self.apply(_init_weights)
 
-    def forward(self, x, cond=None, pid=None, add_info=None, time=None):
+    def forward(self, x, cond=None, pid=None, add_info=None, time=None, mask=None):
         B = x.shape[0]
-        mask = x[:, :, 2:3] != 0
+        # Validity is inferred from feature 2 unless an explicit [B, P] or
+        # [B, P, 1] particle mask is passed (required for density evaluation,
+        # where a real coordinate may cross zero).
+        explicit_mask = mask is not None
+        if explicit_mask:
+            mask = mask.bool().reshape(B, -1, 1)
+        else:
+            mask = x[:, :, 2:3] != 0
         token = self.token.expand(B, -1, -1)
 
         x_embed, x = self.embed(x, mask)
@@ -760,7 +769,13 @@ class PET_body(nn.Module):
         x = torch.cat([token, x], 1)
 
         # Create a new mask based on the updated point cloud with additional tokens
-        mask = x[:, :, 2:3] != 0
+        if explicit_mask:
+            extra = x.shape[1] - mask.shape[1]
+            mask = torch.cat(
+                [torch.ones_like(mask[:, :1]).expand(-1, extra, -1), mask], 1
+            )
+        else:
+            mask = x[:, :, 2:3] != 0
 
         attn_mask = mask.float() @ mask.float().transpose(-1, -2)
         attn_mask = ~(attn_mask.bool()).repeat_interleave(self.num_heads, dim=0)

@@ -102,6 +102,10 @@ def train(
     mlp_drop: float = typer.Option(0.0, help="Dropout for mlp layers"),
     feature_drop: float = typer.Option(0.0, help="Dropout for input features"),
     num_workers: int = typer.Option(16, help="Number of workers for data loading"),
+    device: str = typer.Option(
+        "auto",
+        help="auto (DDP CUDA/CPU, or single-process MPS when no CUDA), cuda, mps or cpu",
+    ),
 ):
     run_training(
         outdir,
@@ -153,6 +157,7 @@ def train(
         feature_drop,
         num_workers,
         clip_inputs=clip_inputs,
+        device=device,
     )
 
 
@@ -267,7 +272,7 @@ def evaluate(
     ),
     sbi: bool = typer.Option(
         False,
-        help="Run SBI parameter inference. Currently only supported for --mode generator",
+        help="Legacy coordinate-wise SBI scan (deprecated; use `omnilearned sbi-fit`)",
     ),
     # Training options
     batch: int = typer.Option(128, help="Batch size"),
@@ -275,6 +280,7 @@ def evaluate(
         False, help="Clip input dataset to be within R=0.8 and atl least 500 MeV"
     ),
     num_workers: int = typer.Option(16, help="Number of workers for data loading"),
+    device: str = typer.Option("auto", help="auto, cuda, mps or cpu"),
 ):
     run_evaluation(
         indir,
@@ -306,6 +312,7 @@ def evaluate(
         batch,
         num_workers,
         clip_inputs=clip_inputs,
+        device=device,
     )
 
 
@@ -342,6 +349,22 @@ def evaluate_hl(
         batch,
         num_workers,
     )
+
+
+@app.command()
+def sbi_fit(
+    config: str = typer.Option(..., "--config", "-c", help="Fit configuration TOML"),
+    device: str = typer.Option("", help="Override the configured device"),
+):
+    """Joint Route A likelihood fit of observations (no truth inputs)."""
+    from omnilearned.sbi.fit import load_fit_config, run_fit
+
+    cfg = load_fit_config(config)
+    if device:
+        cfg["device"] = device
+    doc = run_fit(cfg)
+    print(f"MLE: {doc['summary']['mle']}")
+    print(f"Wrote {cfg['output_prefix']}.json/.npz")
 
 
 @app.command()

@@ -5,11 +5,12 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from omnilearned.utils import (
     is_master_node,
-    ddp_setup,
     get_checkpoint_name,
     restore_checkpoint,
     pad_array,
     get_model_parameters,
+    setup_execution,
+    SingleDeviceModule,
 )
 from omnilearned.diffusion import generate, estimate_max_logp
 import os
@@ -120,6 +121,7 @@ def test_step(model, dataloader, mode, device, sbi=False, dataset="top"):
                             multiplicity=mult,
                             scan_ranges=[(6.5, 7.3), (4.5, 5.5)],
                             scan_points=30,
+                            device=device,
                         )["theta"]
                         .detach()
                         .cpu()
@@ -133,6 +135,7 @@ def test_step(model, dataloader, mode, device, sbi=False, dataset="top"):
                             **model_kwargs,
                             multiplicity=mult,
                             dataset=dataset,
+                            device=device,
                         )
                         .detach()
                         .cpu()
@@ -196,8 +199,9 @@ def run(
     batch: int = 64,
     num_workers: int = 16,
     clip_inputs: bool = False,
+    device: str = "auto",
 ):
-    local_rank, rank, size = ddp_setup()
+    local_rank, rank, size, device_info, distributed = setup_execution(device)
 
     model_params = get_model_parameters(model_size)
 
@@ -224,13 +228,13 @@ def run(
     )
 
     if rank == 0:
-        d = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        d = device_info.device
         print("**** Setup ****")
         print(
             "Total params: %.2fM"
             % (sum(p.numel() for p in model.parameters()) / 1000000.0)
         )
-        print(f"Evaluating on device: {d}, with {size} GPUs")
+        print(f"Evaluating on device: {d}, with {size} processes")
         print("************")
 
     # load in train data
@@ -266,7 +270,7 @@ def run(
             model,
             indir,
             get_checkpoint_name(save_tag),
-            local_rank,
+            local_rank if distributed else device_info.device,
             is_main_node=is_master_node(),
             restore_ema_model=mode in ["generator"],
         )
@@ -277,19 +281,24 @@ def run(
         )
 
     # Transfer model to GPU if available
-    kwarg = {}
-    if torch.cuda.is_available():
-        device = local_rank
-        model.to(local_rank)
-        kwarg["device_ids"] = [device]
-    else:
-        model.cpu()
-        device = "cpu"
+    if distributed:
+        kwarg = {}
+        if torch.cuda.is_available():
+            device = local_rank
+            model.to(local_rank)
+            kwarg["device_ids"] = [device]
+        else:
+            model.cpu()
+            device = "cpu"
 
-    model = DDP(
-        model,
-        **kwarg,
-    )
+        model = DDP(
+            model,
+            **kwarg,
+        )
+    else:
+        device = device_info.device
+        model.to(device)
+        model = SingleDeviceModule(model)
 
     eval_model(
         model,
@@ -303,5 +312,6 @@ def run(
         save_tag=save_tag,
         sbi=sbi,
     )
-    dist.barrier()
-    dist.destroy_process_group()
+    if distributed:
+        dist.barrier()
+        dist.destroy_process_group()

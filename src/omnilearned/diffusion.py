@@ -1,7 +1,11 @@
+import warnings
+
 import torch
 import torch.nn as nn
 import numpy as np
 from torchdiffeq import odeint
+
+from omnilearned.sbi.base import GaussianBase
 
 
 class MPFourier(nn.Module):
@@ -19,12 +23,9 @@ class MPFourier(nn.Module):
 
 
 def get_eps(x, mask, dataset):
-    if dataset == "jetnet":
-        return get_jetnet_eps(x, mask)
-    elif dataset == "lhco":
-        return get_ad_eps(x, mask)
-    else:
-        return torch.randn_like(x) * mask
+    # Dataset-specific bases are defined once in omnilearned.sbi.base so that
+    # training perturbation, generation and density evaluation agree.
+    return GaussianBase.from_dataset(dataset, x.shape[-1]).sample_like(x, mask)
 
 
 def get_logsnr_alpha_sigma(time, shift=1.0):
@@ -35,37 +36,11 @@ def get_logsnr_alpha_sigma(time, shift=1.0):
 
 
 def get_ad_eps(x, mask):
-    means = torch.tensor([0.0, 0.0, 1.11398, 1.43384], device=x.device)
-    stds = torch.tensor(
-        [0.270949, 0.27426, 1.30273, 1.33559],
-        device=x.device,
-    )
-
-    if x.shape[-1] == 4:
-        means = means.view(1, 1, 4)
-        stds = stds.view(1, 1, 4)
-        eps = torch.randn_like(x) * stds + means
-    else:
-        eps = torch.randn_like(x)
-
-    return eps * mask
+    return GaussianBase.from_dataset("lhco", x.shape[-1]).sample_like(x, mask)
 
 
 def get_jetnet_eps(x, mask):
-    means = torch.tensor([0.0, 0.0, 2.92904309e00, 3.14843288e00], device=x.device)
-    stds = torch.tensor(
-        [0.11580968, 0.11667726, 0.95442127, 0.98245158],
-        device=x.device,
-    )
-
-    if x.shape[-1] == 4:
-        means = means.view(1, 1, 4)
-        stds = stds.view(1, 1, 4)
-        eps = torch.randn_like(x) * stds + means
-    else:
-        eps = torch.randn_like(x)
-
-    return eps * mask
+    return GaussianBase.from_dataset("jetnet", x.shape[-1]).sample_like(x, mask)
 
 
 def get_ad_eps_hl(x):
@@ -325,7 +300,19 @@ def estimate_max_logp(
 
     Returns a dict with the best-fit parameters, the max log-likelihood,
     per-parameter 1D log-likelihood profiles, and the grid axes.
+
+    Deprecated: this scans coordinates independently, sums the likelihood
+    over the minibatch and fixes a JetNet base. Use ``omnilearned.sbi``
+    (per-event ``log_prob`` and ``joint_scan``) or ``omnilearned sbi-fit``.
     """
+    warnings.warn(
+        "estimate_max_logp performs independent coordinate scans of a batch-summed "
+        "likelihood with a JetNet base; it is kept for legacy outputs only. Use "
+        "omnilearned.sbi.joint_scan with per-event omnilearned.sbi.log_prob "
+        "(CLI: `omnilearned sbi-fit`) for joint parameter inference.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
@@ -344,16 +331,9 @@ def estimate_max_logp(
     x = x * mask_f
 
     # ---- base distribution parameters (must match get_eps) ---------
-    if nfeat == 4:
-        base_means = torch.tensor(
-            [0.0, 0.0, 2.92904309e00, 3.14843288e00], device=device
-        ).view(1, 1, 4)
-        base_stds = torch.tensor(
-            [0.11580968, 0.11667726, 0.95442127, 0.98245158], device=device
-        ).view(1, 1, 4)
-    else:
-        base_means = torch.zeros(1, 1, nfeat, device=device)
-        base_stds = torch.ones(1, 1, nfeat, device=device)
+    legacy_base = GaussianBase.from_dataset("jetnet", nfeat)
+    base_means = torch.tensor(legacy_base.means, device=device).view(1, 1, nfeat)
+    base_stds = torch.tensor(legacy_base.stds, device=device).view(1, 1, nfeat)
 
     # ---- freeze the Hutchinson probe (Rademacher) -------------------------
     if seed is not None:

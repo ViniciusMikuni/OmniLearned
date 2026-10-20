@@ -840,7 +840,16 @@ def restore_checkpoint(
     optimizer=None,
     lr_scheduler=None,
 ):
-    device = "cuda:{}".format(device) if torch.cuda.is_available() else "cpu"
+    if isinstance(device, (str, torch.device)) and torch.device(device).type in (
+        "cpu",
+        "mps",
+    ):
+        # Explicit single-process device: load on CPU, then move.
+        map_location, target = "cpu", torch.device(device)
+    else:
+        # Legacy integer local rank (CUDA when available).
+        device = "cuda:{}".format(device) if torch.cuda.is_available() else "cpu"
+        map_location = target = device
 
     if fine_tune and not os.path.exists(os.path.join(checkpoint_dir, checkpoint_name)):
         print(f"Fetching pretrained checkpoint {checkpoint_name}")
@@ -855,11 +864,11 @@ def restore_checkpoint(
 
     checkpoint = torch.load(
         os.path.join(checkpoint_dir, checkpoint_name),
-        map_location=device,
+        map_location=map_location,
     )
 
     base_model = model.module if hasattr(model, "module") else model
-    base_model.to(device)
+    base_model.to(target)
 
     if restore_ema_model:
         body_name = "ema_body"
@@ -1059,6 +1068,39 @@ def is_master_node():
         return int(os.environ["RANK"]) == 0
     else:
         return True
+
+
+class SingleDeviceModule(torch.nn.Module):
+    """Single-process stand-in for DDP exposing the wrapped model as ``module``."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, *args, **kwargs):
+        return self.module(*args, **kwargs)
+
+
+def setup_execution(device="auto"):
+    """Choose distributed CUDA/CPU execution or an explicit single-process device.
+
+    ``auto`` keeps the upstream behaviour (DDP, CUDA when available, otherwise
+    CPU) unless no CUDA device exists and MPS is available, in which case the
+    single-process MPS path is used. An explicit ``mps`` or ``cpu`` request
+    runs single-process without initializing a process group.
+
+    Returns:
+        (local_rank, rank, world_size, device_info, distributed)
+    """
+    from omnilearned.sbi.device import resolve_device
+
+    info = resolve_device(device)
+    if info.torch_device.type == "cuda" or (
+        device in ("auto", None) and info.device == "cpu"
+    ):
+        local_rank, rank, size = ddp_setup()
+        return local_rank, rank, size, info, True
+    return 0, 0, 1, info, False
 
 
 def ddp_setup():

@@ -11,7 +11,6 @@ from diffusers.optimization import get_cosine_schedule_with_warmup
 
 from omnilearned.utils import (
     is_master_node,
-    ddp_setup,
     get_param_groups,
     CLIPLoss,
     get_checkpoint_name,
@@ -20,6 +19,8 @@ from omnilearned.utils import (
     save_checkpoint,
     restore_checkpoint,
     get_model_parameters,
+    setup_execution,
+    SingleDeviceModule,
 )
 
 import time
@@ -28,6 +29,13 @@ import torch.amp as amp
 
 torch.set_float32_matmul_precision("high")
 torch._dynamo.config.verbose = False
+
+
+def autocast_type(device):
+    """Autocast device type: legacy integer ranks map to CUDA when available."""
+    if isinstance(device, int):
+        return "cuda:{}".format(device) if torch.cuda.is_available() else "cpu"
+    return torch.device(device).type
 
 
 def get_logs(device):
@@ -93,10 +101,7 @@ def train_step(
         else:
             data_pid = None
 
-        with amp.autocast(
-            "cuda:{}".format(device) if torch.cuda.is_available() else "cpu",
-            enabled=use_amp,
-        ):
+        with amp.autocast(autocast_type(device), enabled=use_amp):
             outputs = model(X, y, **model_kwargs)
             loss = get_loss(
                 outputs,
@@ -134,6 +139,10 @@ def train_step(
         for key in logs:
             dist.all_reduce(logs[key].detach())
             logs[key] = float(logs[key] / dist.get_world_size() / iterations_per_epoch)
+    else:
+        # Single-process device path (no process group).
+        for key in logs:
+            logs[key] = float(logs[key] / iterations_per_epoch)
 
     return logs
 
@@ -198,6 +207,10 @@ def val_step(
         for key in logs:
             dist.all_reduce(logs[key].detach())
             logs[key] = float(logs[key] / dist.get_world_size() / iterations_per_epoch)
+    else:
+        # Single-process device path (no process group).
+        for key in logs:
+            logs[key] = float(logs[key] / iterations_per_epoch)
 
     return logs
 
@@ -235,7 +248,7 @@ def train_model(
 
     tracker = {"bestValLoss": loss_init, "bestEpoch": epoch_init}
     if use_amp:
-        gscaler = amp.GradScaler()
+        gscaler = amp.GradScaler(autocast_type(device).split(":")[0])
     else:
         gscaler = None
     for epoch in range(int(epoch_init), num_epochs):
@@ -388,8 +401,9 @@ def run(
     feature_drop: float = 0.0,
     num_workers: int = 16,
     clip_inputs: bool = False,
+    device: str = "auto",
 ):
-    local_rank, rank, size = ddp_setup()
+    local_rank, rank, size, device_info, distributed = setup_execution(device)
 
     model_params = get_model_parameters(model_size)
     # set up model
@@ -419,13 +433,14 @@ def run(
     )
 
     if rank == 0:
-        d = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        d = device_info.device
         print("**** Setup ****")
         print(
             "Total params: %.2fM"
             % (sum(p.numel() for p in model.parameters()) / 1000000.0)
         )
-        print(f"Training on device: {d}, with {size} GPUs")
+        print(f"Training on device: {d}, with {size} processes")
+        print(f"Device selection: {device_info.to_dict()}")
         print("************")
 
     # load in train data
@@ -505,19 +520,25 @@ def run(
         )
 
     # Transfer model to GPU if available
-    kwarg = {}
-    if torch.cuda.is_available():
-        device = local_rank
-        model.to(local_rank)
-        kwarg["device_ids"] = [device]
-    else:
-        model.cpu()
-        device = "cpu"
+    if distributed:
+        kwarg = {}
+        if torch.cuda.is_available():
+            device = local_rank
+            model.to(local_rank)
+            kwarg["device_ids"] = [device]
+        else:
+            model.cpu()
+            device = "cpu"
 
-    model = DDP(
-        model,
-        **kwarg,
-    )
+        model = DDP(
+            model,
+            **kwarg,
+        )
+    else:
+        # Explicit single-process device (e.g. Apple MPS), float32 tensors.
+        device = device_info.device
+        model.to(device)
+        model = SingleDeviceModule(model)
 
     # Set up EMA model
     ema_model = shadow_copy(model.module)
@@ -546,7 +567,7 @@ def run(
             model,
             outdir,
             checkpoint_name,
-            local_rank,
+            local_rank if distributed else device,
             is_main_node=is_master_node(),
             ema_model=ema_model,
             optimizer=optimizer,
@@ -612,4 +633,5 @@ def run(
         ema_model=ema_model,
     )
 
-    dist.destroy_process_group()
+    if distributed:
+        dist.destroy_process_group()
