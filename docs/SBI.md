@@ -92,6 +92,15 @@ and zero mass; the `evaluated` mask is saved. It reproduces the dense grid up
 to the mass below max − delta, provided the seed lattice intersects every
 relevant supported region.
 
+### Toy simulator (branch dev/nle-perlmutter)
+
+`omnilearned.sbi.toy` is the `toy-quenching-v1` simulator (ported from the omni-sbi-mc
+application): `simulator.sample_toy`, FastJet reconstruction (`reco`, through hepyy/cppyy),
+the selection for generated clouds (`selection.select_clouds`), jet observables, seeded
+streams (`design.rng_for`) and record writers. Constants: `configs/toy-quenching-v1.toml`.
+`config.array_sha256` gives a platform-independent hash of drawn records
+(`tests/sbi/test_toy.py::test_cross_host_reproducibility`). Plan: `PLAN_NLE_PERLMUTTER.md`.
+
 ### Fit configuration (`omnilearned sbi-fit`)
 
 See the docstring of `omnilearned/sbi/fit.py`. The configuration may contain

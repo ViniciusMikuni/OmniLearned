@@ -1,0 +1,93 @@
+# toy-quenching-v1 constants, selection, seeds and reserved settings.
+# Copied unchanged from omni-sbi-mc a/configs/toy-closure.toml (2026-10-21).
+# Changing [toy] or [selection] defines a new backend id (not toy-quenching-v1).
+# [design.*] are the Cartesian training designs used so far (reference only;
+# PLAN_NLE_PERLMUTTER.md prescribes a continuous design for the new work).
+# [holdout] values are read only by simulation and report drivers, never by fits.
+
+backend = "toy-quenching-v1"
+
+[toy]
+geometry_radius_fm = 6.5
+temperature_cut_GeV = 0.17
+temperature_scale_GeV = 0.35
+length_scale_fm = 1.0
+integration_steps = 64
+power_law_exponent = 5.0
+hard_pt_min_GeV = 40.0
+hard_pt_max_GeV = 500.0
+loss_coefficient = 0.12
+loss_lognormal_sigma = 0.30
+core_count = 24
+soft_count = 8
+dirichlet_core_alpha = 0.7
+dirichlet_soft_alpha = 0.9
+soft_fraction_baseline = 0.03
+soft_fraction_amplitude = 0.17
+soft_fraction_rate = 0.8
+vacuum_width_rad = 0.08
+vacuum_width_pt_exponent = -0.15
+broadening_width_rad = 0.04
+soft_width_ratio = 2.2
+pt_scale_GeV = 100.0
+center_eta_range = [-0.5, 0.5]
+center_phi_range_rad = [-0.6, 0.6]
+
+[selection]
+jet_algorithm = "antikt"
+jet_radius = 0.4
+jet_pt_range_GeV = [60.0, 200.0]
+jet_abs_eta_max = 1.0
+constituent_abs_eta_max = 2.5
+constituent_abs_phi_max_rad = 1.2
+constituent_pt_min_GeV = 0.0
+require_all_particles_in_one_jet = true
+fixed_constituent_count = 32
+one_jet_per_event = true
+max_attempts_per_requested_event = 1000
+
+[features]
+names = ["eta_absolute", "phi_absolute", "log_pt_over_GeV"]
+finite_interval_transform = "atanh"
+standardization = "training_split_only"
+explicit_mask = true
+condition_on_jet_pt = false
+include_total_event_yield = false
+unknown_context = ["b", "T_ref", "tau_init"]
+
+[randomness]
+design_seed = 10921
+training_seed = 19071
+validation_seed = 29173
+test_seed = 39181
+probe_seed = 49193
+probe_indexing = "stable_event_id"
+
+[holdout]
+primary_test = [4.5, 0.40, 0.65]
+development_validation = [7.5, 0.30, 0.95]
+additional_test_settings = [[1.5, 0.50, 0.35], [10.0, 0.30, 1.0]]
+truth_manifest_access = "report_only_after_fit"
+
+# first study (80 settings, 160k training jets)
+[design.demonstration]
+b = [0.0, 3.0, 6.0, 9.0, 11.0]
+T_ref = [0.25, 0.35, 0.45, 0.55]
+tau_init = [0.2, 0.5, 0.8, 1.2]
+accepted_train_per_setting = 2000
+accepted_validation_per_setting = 256
+training_step_cap = 20000
+pseudo_data_events = 1000
+repeated_ensembles = 20
+
+# scale-up test on the GPU node (1430 settings, 2.1M training jets); every
+# reserved setting lies strictly between axis values.
+[design.dense]
+b = [0.0, 0.75, 2.25, 3.0, 3.75, 5.25, 6.0, 6.75, 8.25, 9.0, 9.75, 10.5, 11.0]
+T_ref = [0.25, 0.275, 0.325, 0.35, 0.375, 0.425, 0.45, 0.475, 0.525, 0.55]
+tau_init = [0.2, 0.275, 0.425, 0.5, 0.575, 0.725, 0.8, 0.875, 1.025, 1.1, 1.2]
+accepted_train_per_setting = 1500
+accepted_validation_per_setting = 128
+training_step_cap = 100000
+pseudo_data_events = 1000
+repeated_ensembles = 20
