@@ -18,6 +18,7 @@ profiles and marginals are returned separately and labelled.
 import json
 import math
 import time
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -105,6 +106,7 @@ class ScanResult:
     n_events: int = 0
     mode: str = "fixed_vector"
     diagnostics: dict = field(default_factory=dict)
+    evaluated: np.ndarray = None  # support scans: nodes actually computed
 
     # ---- posterior ------------------------------------------------------
     def log_posterior(self):
@@ -135,7 +137,9 @@ class ScanResult:
         """Profile log likelihood: maximize over the other axes."""
         k = self.grid.names.index(name)
         others = tuple(i for i in range(self.loglik.ndim) if i != k)
-        return self.grid.axes[k], np.nanmax(self.loglik, axis=others)
+        with warnings.catch_warnings():  # all-nan slices of support scans
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return self.grid.axes[k], np.nanmax(self.loglik, axis=others)
 
     def slice(self, name, at=None):
         """Conditional slice of log L through ``at`` (default: grid MLE)."""
@@ -205,6 +209,8 @@ class ScanResult:
             arrays["per_event"] = self.per_event
         if self.log_norm is not None:
             arrays["log_norm"] = self.log_norm
+        if self.evaluated is not None:
+            arrays["evaluated"] = self.evaluated
         np.savez_compressed(f"{path_prefix}.npz", **arrays)
         doc = {
             "grid": self.grid.to_dict(),
@@ -233,6 +239,7 @@ class ScanResult:
             n_events=doc["summary"]["n_events"],
             mode=doc["summary"]["mode"],
             diagnostics=doc.get("diagnostics", {}),
+            evaluated=arr["evaluated"] if "evaluated" in arr else None,
         )
 
 
@@ -353,6 +360,145 @@ def joint_scan(
         diagnostics={
             "seconds": time.time() - start,
             "complete": complete,
+            "nonfinite_event_values": int(nonfinite.sum()),
+            "candidates_with_nonfinite": int((nonfinite > 0).sum()),
+            "accumulation_dtype": "float64",
+            "event_chunk": event_chunk,
+            "candidate_chunk": candidate_chunk,
+        },
+    )
+
+
+def seed_mask(shape, stride):
+    """Sub-lattice of a grid: every ``stride[k]``-th node per axis plus the last."""
+    mask = np.ones(shape, dtype=bool)
+    for k, (n, s) in enumerate(zip(shape, stride)):
+        keep = np.zeros(n, dtype=bool)
+        keep[:: max(1, int(s))] = True
+        keep[-1] = True
+        sh = [1] * len(shape)
+        sh[k] = n
+        mask = mask & keep.reshape(sh)
+    return mask
+
+
+def dilate(mask):
+    """Boolean dilation over the full 3^d - 1 neighbourhood (no wrap-around)."""
+    d = mask.ndim
+    pad = np.pad(mask, 1)
+    out = np.zeros_like(mask)
+    for off in np.ndindex(*(3,) * d):
+        out |= pad[tuple(slice(o, o + n) for o, n in zip(off, mask.shape))]
+    return out
+
+
+def support_scan(
+    logp_fn,
+    n_events,
+    grid,
+    seed_stride,
+    delta_logpost=10.0,
+    event_chunk=256,
+    candidate_chunk=8,
+    log_prior=None,
+    log_norm_fn=None,
+    keep_per_event=True,
+    progress=None,
+    max_seconds=None,
+):
+    """Fixed-vector scan that evaluates the supported region of a fine grid.
+
+    For posteriors much narrower than the domain (thin, curved degeneracies)
+    where a dense grid fine enough to resolve them is unaffordable. The seed
+    sub-lattice (:func:`seed_mask`) is evaluated first; then every unevaluated
+    node adjacent (3^d - 1 neighbourhood) to an evaluated node with log
+    posterior >= max - ``delta_logpost`` is evaluated, repeatedly, until no
+    such node remains ("closed"). Unevaluated nodes keep ``loglik = nan`` and
+    zero posterior mass, so the result equals the dense-grid result up to the
+    mass of nodes below max - delta that are not connected to the seeds'
+    supported region. A supported region not touched by any seed node with
+    log posterior >= max - delta is missed: the seed lattice must be fine
+    enough to intersect every relevant mode. Returns a :class:`ScanResult`
+    whose ``evaluated`` mask records which nodes were computed.
+    """
+    pts = grid.points()
+    shape = grid.shape
+    M = pts.shape[0]
+    lp_prior = uniform_log_prior(grid) if log_prior is None else log_prior
+    lp_prior = np.broadcast_to(lp_prior, shape).reshape(-1)
+    loglik = np.full(M, np.nan)
+    log_norm = np.full(M, np.nan) if log_norm_fn is not None else None
+    per_event = np.full((M, n_events), np.nan) if keep_per_event else None
+    evaluated = np.zeros(M, dtype=bool)
+    nonfinite = np.zeros(M, dtype=np.int64)
+    start = time.time()
+    complete = True
+    passes = []
+
+    def evaluate(idx):
+        nonlocal complete
+        for c0 in range(0, len(idx), candidate_chunk):
+            sel = idx[c0 : c0 + candidate_chunk]
+            cand = pts[sel]
+            total = np.zeros(len(sel))
+            for e0 in range(0, n_events, event_chunk):
+                sl = slice(e0, min(n_events, e0 + event_chunk))
+                vals = np.asarray(logp_fn(sl, cand), dtype=np.float64)
+                if vals.shape != (len(sel), sl.stop - sl.start):
+                    raise ValueError(f"logp_fn returned shape {vals.shape}")
+                bad = ~np.isfinite(vals)
+                nonfinite[sel] += bad.sum(1)
+                total += np.where(bad, 0.0, vals).sum(1)
+                if per_event is not None:
+                    per_event[sel, sl] = vals
+            if log_norm is not None:
+                log_norm[sel] = np.asarray(log_norm_fn(cand), dtype=np.float64)
+                total = total - n_events * log_norm[sel]
+            loglik[sel] = np.where(nonfinite[sel] > 0, np.nan, total)
+            evaluated[sel] = True
+            if progress is not None:
+                progress(int(evaluated.sum()), M, time.time() - start)
+            if max_seconds is not None and time.time() - start > max_seconds:
+                complete = False
+                return
+
+    todo = np.flatnonzero(seed_mask(shape, seed_stride).reshape(-1))
+    while todo.size and complete:
+        passes.append(int(todo.size))
+        evaluate(todo)
+        lp = loglik + lp_prior
+        if not np.isfinite(lp).any():
+            break
+        active = evaluated & (lp >= np.nanmax(lp) - delta_logpost)
+        todo = np.flatnonzero(dilate(active.reshape(shape)).reshape(-1) & ~evaluated)
+    lp = loglik + lp_prior
+    finite = np.isfinite(lp)
+    if finite.any():
+        active = evaluated & (lp >= np.nanmax(lp) - delta_logpost)
+        closed = bool(complete and not (dilate(active.reshape(shape)).reshape(-1)
+                                        & ~evaluated).any())
+    else:
+        active, closed = np.zeros(M, dtype=bool), False
+    return ScanResult(
+        grid=grid,
+        loglik=loglik.reshape(shape),
+        logprior=lp_prior.reshape(shape).copy(),
+        per_event=per_event,
+        log_norm=None if log_norm is None else log_norm.reshape(shape),
+        n_events=n_events,
+        mode="fixed_vector",
+        evaluated=evaluated.reshape(shape),
+        diagnostics={
+            "seconds": time.time() - start,
+            "complete": complete,
+            "scan": "support",
+            "support_closed": closed,
+            "delta_logpost": float(delta_logpost),
+            "seed_stride": [int(s) for s in seed_stride],
+            "evaluated": int(evaluated.sum()),
+            "grid_size": int(M),
+            "passes": passes,
+            "supported_nodes": int(active.sum()),
             "nonfinite_event_values": int(nonfinite.sum()),
             "candidates_with_nonfinite": int((nonfinite > 0).sum()),
             "accumulation_dtype": "float64",

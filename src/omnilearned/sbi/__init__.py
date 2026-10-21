@@ -30,6 +30,7 @@ from omnilearned.sbi.scan import (
     local_variable_loglik,
     normalized_log_weights,
     refine_axes,
+    support_scan,
     trapezoid_weights,
     uniform_log_prior,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "local_variable_loglik",
     "normalized_log_weights",
     "refine_axes",
+    "support_scan",
     "trapezoid_weights",
     "uniform_log_prior",
     "FeatureTransform",

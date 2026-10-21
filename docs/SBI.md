@@ -39,7 +39,7 @@ training studies and closure reports belong to the application workspace.
 | `transforms` | `FeatureTransform` (bounded atanh + standardization, fitted on training data only) |
 | `parameters` | `ConditionLayout`: named unknown parameters vs known context, fixed normalization; candidates fill unknown columns, observations never do |
 | `likelihood` | `log_prob(velocity, x, mask, base, cond, options, event_ids)` -> per-event float64 log densities + diagnostics; `sample()`; `frozen_for_inference()` |
-| `scan` | `Grid`, `joint_scan`, `ScanResult` (log L grid, posterior mass with trapezoid cell volumes, slices, profiles, marginals, intervals, boundary flags), `local_variable_loglik`, `refine_axes` |
+| `scan` | `Grid`, `joint_scan`, `ScanResult` (log L grid, posterior mass with trapezoid cell volumes, slices, profiles, marginals, intervals, boundary flags), `local_variable_loglik`, `refine_axes`, `support_scan` |
 | `observations` | truth-free observation files (`x`, `mask`, `event_id`, optional `context`); the reader refuses truth/diagnostic fields |
 | `velocity` | `SetFlowVelocity` (smooth, permutation-equivariant, global masked attention, FiLM conditioning) and `PETVelocity` (upstream PET2 with explicit mask) |
 | `flow` | `train_flow` (single process, explicit device, EMA, validation-only selection), `FlowSurrogate` (model + base + transform + layout; `log_prob`, `log_prob_paired`, `sample`, `save`/`load` with sha256) |
@@ -82,6 +82,15 @@ Posterior grids are normalized with trapezoid cell volumes over the declared
 domain; `marginal` integrates, `profile` maximizes, `slice` conditions. The
 full joint grid (and per-event values) is saved. A refined grid
 (`refine_axes`) uses only the scan result, never truth.
+
+For posteriors much narrower than the domain (thin, curved degeneracies),
+`support_scan` (fit config `[scan].support = {seed_stride, delta_logpost}`)
+evaluates a seed sub-lattice of a fine `[grid]`, then repeatedly every
+neighbour (3^d − 1) of an evaluated node with log posterior ≥ max − delta,
+until none is left (`support_closed`). Unevaluated nodes have `loglik = nan`
+and zero mass; the `evaluated` mask is saved. It reproduces the dense grid up
+to the mass below max − delta, provided the seed lattice intersects every
+relevant supported region.
 
 ### Fit configuration (`omnilearned sbi-fit`)
 

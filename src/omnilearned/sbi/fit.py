@@ -30,6 +30,8 @@ numerical options. It has no truth section. Example (TOML)::
     candidate_chunk = 8
     max_seconds = 900
     refine = {rounds = 1, delta_logpost = 12.0, points = [9, 9]}
+    # or, instead of refine: evaluate only the supported region of [grid]
+    # support = {seed_stride = [4, 4], delta_logpost = 10.0}
 
     [local]                           # only for mode = "local_variable"
     name = "b"
@@ -56,6 +58,7 @@ from omnilearned.sbi.scan import (
     joint_scan,
     local_variable_loglik,
     refine_axes,
+    support_scan,
     uniform_log_prior,
 )
 
@@ -167,7 +170,26 @@ def run_fit(cfg, log_norm_fn=None, local_log_weight_fn=None, log=print,
     def progress(done, total, sec):
         log(f"  candidates {done}/{total} {sec:.0f}s")
 
-    if mode == "fixed_vector":
+    if mode == "fixed_vector" and scan_cfg.get("support"):
+        if int(scan_cfg.get("refine", {}).get("rounds", 0)):
+            raise ValueError("scan.support and scan.refine are exclusive")
+        sup = scan_cfg["support"]
+        grid = _grid(cfg["grid"])
+        fn, diag = make_logp_fn(surrogate, obs, options, grid.names)
+        res = support_scan(fn, len(obs), grid, sup["seed_stride"],
+                           delta_logpost=sup.get("delta_logpost", 10.0),
+                           event_chunk=scan_cfg.get("event_chunk", 256),
+                           candidate_chunk=scan_cfg.get("candidate_chunk", 8),
+                           log_prior=_prior(cfg, grid), log_norm_fn=log_norm_fn,
+                           keep_per_event=True, progress=progress,
+                           max_seconds=scan_cfg.get("max_seconds"))
+        res.diagnostics["likelihood"] = diag
+        d = res.diagnostics
+        log(f"support scan: grid {grid.shape} evaluated {d['evaluated']}/{d['grid_size']} "
+            f"passes {d['passes']} closed={d['support_closed']} mle {res.summary()['mle']} "
+            f"{d['seconds']:.0f}s")
+        doc = res.save(out_prefix, extra={"provenance": provenance})
+    elif mode == "fixed_vector":
         grid = _grid(cfg["grid"])
         rounds = []
         refine = scan_cfg.get("refine", {})
