@@ -65,7 +65,10 @@ FORBIDDEN_KEYS = ("truth", "holdout", "theta_star", "test_settings")
 
 
 def load_fit_config(path):
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib
 
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
