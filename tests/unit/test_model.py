@@ -118,12 +118,15 @@ def test_diffusion_counts_not_velocity():
     assert get_loss(out, torch.zeros(1), "generator") == 4
 
 
-def test_decoder_condition():
+def test_decoder_latent_condition():
     model = small(use_int=False, mode="encoder", num_particles=5).eval()
-    z = torch.randn(1, 10)
-    a, _ = model.decoder(z, torch.tensor([0]))
-    b, _ = model.decoder(z, torch.tensor([1]))
+    z = torch.randn(1, model.num_tokens, 4, requires_grad=True)
+    a, logits = model.decoder(z)
+    b, _ = model.decoder(z + 1)
+    assert a.shape == (1, 5, 4) and logits.shape == (1, 5)
     assert not torch.allclose(a, b)
+    (a.square().mean() + logits.square().mean()).backward()
+    assert torch.isfinite(z.grad).all() and z.grad.abs().sum() > 0
 
 
 def test_presets():
@@ -190,7 +193,7 @@ def test_reconstruction_dispatch(monkeypatch):
         return loss
 
     monkeypatch.setattr(utils, "emd_loss", fn("emd"))
-    monkeypatch.setattr(utils, "wd_loss", fn("wd"))
+    monkeypatch.setattr(utils, "sliced_wasserstein_loss", fn("ot"))
     mask = torch.arange(250)[None, :, None] < torch.tensor([3, 201])[:, None, None]
     out = {
         "x": torch.zeros(2, 250, 4),
@@ -199,7 +202,7 @@ def test_reconstruction_dispatch(monkeypatch):
         "mask_logits": torch.zeros(2, 240),
     }
     assert torch.isfinite(get_loss(out, torch.zeros(2), "encoder"))
-    assert calls == [("emd", [3]), ("wd", [201])]
+    assert calls == [("emd", [3, 201]), ("ot", [3, 201])]
 
 
 def test_checkpoint_roundtrip():
@@ -208,8 +211,8 @@ def test_checkpoint_roundtrip():
     a = small(use_int=False, mode="encoder", num_particles=4).eval()
     b = small(use_int=False, mode="encoder", num_particles=4).eval()
     load_weights(b, {"model": a.state_dict()})
-    latent, y = torch.randn(2, 10), torch.tensor([0, 1])
-    for x, z in zip(a.decoder(latent, y), b.decoder(latent, y), strict=False):
+    latent, y = torch.randn(2, a.num_tokens, 4), torch.tensor([0, 1])
+    for x, z in zip(a.decoder(latent), b.decoder(latent), strict=True):
         torch.testing.assert_close(x, z)
     a, b = small(use_int=False).eval(), small(use_int=False).eval()
     load_weights(

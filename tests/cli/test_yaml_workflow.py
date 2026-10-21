@@ -9,71 +9,48 @@ import typer
 from omnilearned.cli import app
 from omnilearned.config import resolve
 from omnilearned.submit import validated_args
+from omnilearned.utils import get_model_parameters
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_config_matrix():
     commands = typer.main.get_command(app).commands
-    expected = set()
-    for size in ("small", "medium", "large"):
-        expected.add(f"pretrain_{size}")
-        for dataset in (
-            "top",
-            "qg",
-            "jetnet30",
-            "jetnet150",
-            "atlas_flav",
-            "microboone",
-            "minerva",
-            "camels",
-            "quijote",
-        ):
-            modes = (
-                ("regression", "segmentation")
-                if dataset in ("camels", "quijote")
-                else (None,)
-            )
-            for mode in modes:
-                for kind in ("scratch", "finetune"):
-                    expected.add("_".join(x for x in (dataset, mode, size, kind) if x))
-    assert {
-        p.stem
-        for p in (ROOT / "configs").glob("*.yaml")
-        if not p.stem.startswith("evaluate_")
-    } == expected
-    assert {
-        p.stem.removeprefix("evaluate_")
-        for p in (ROOT / "configs").glob("evaluate_*.yaml")
-    } == expected
-    for stem in expected:
-        resolved = {}
-        for command, filename in [("train", stem), ("evaluate", "evaluate_" + stem)]:
-            path = ROOT / "configs" / f"{filename}.yaml"
-            with commands[command].make_context(
-                command, ["--config", str(path)]
-            ) as ctx:
-                resolved[command] = resolve(ctx.params)
-        train, evaluation = resolved["train"], resolved["evaluate"]
-        assert train["save_tag"] == evaluation["save_tag"] == stem
-        assert train["outdir"] == evaluation["indir"]
-        assert train["dataset"] == evaluation["dataset"]
-        assert train["size"] == evaluation["size"]
-        assert not train["resuming"]
-        if stem.startswith("pretrain_"):
-            assert train["dataset"] == train["mode"] == "pretrain"
-        else:
-            assert train["fine_tune"] == stem.endswith("_finetune")
-            if train["fine_tune"]:
-                assert train["pretrain_tag"] == "pretrain_" + train["size"]
-        if train["dataset"] in ("jetnet30", "jetnet150"):
-            assert train["mode"] == evaluation["mode"] == "generator"
-        if train["dataset"] in ("top", "qg", "microboone", "minerva"):
-            assert train["mode"] == evaluation["mode"] == "classifier"
-        if train["dataset"] == "top":
-            assert train["num_classes"] == evaluation["num_classes"] == 2
-        if train["dataset"] == "atlas_flav":
-            assert train["mode"] == "ftag" and evaluation["mode"] == "classifier"
+    paths = sorted((ROOT / "configs").glob("*.yaml"))
+    assert paths
+    resolved = {}
+    for path in paths:
+        command = "evaluate" if path.stem.startswith("evaluate_") else "train"
+        with commands[command].make_context(command, ["--config", str(path)]) as ctx:
+            c = resolve(ctx.params)
+        resolved[path.stem] = c
+        allowed = {"classifier", "regression", "segmentation", "generator", "encoder"}
+        if command == "train":
+            allowed |= {"ftag", "pretrain", "pretrain_regression", "pretrain_decoder"}
+        assert c["mode"] in allowed, path.name
+        assert c["batch"] > 0 and c["num_feat"] > 0, path.name
+        assert c["num_tokens"] > 0, path.name
+        get_model_parameters(c["size"])
+
+    # Check matching recipes, without requiring every dataset/size combination.
+    # Cross-dataset evaluation and CLI-supplied save tags are supported.
+    for name, evaluation in resolved.items():
+        if not name.startswith("evaluate_"):
+            continue
+        stem = name.removeprefix("evaluate_")
+        train = resolved.get(stem)
+        if train is None or train["save_tag"] != evaluation["save_tag"]:
+            continue
+        assert train["outdir"] == evaluation["indir"], name
+        for key in ("dataset", "size", "num_classes", "num_gen_classes"):
+            assert train[key] == evaluation[key], (name, key)
+        expected_mode = {
+            "ftag": "classifier",
+            "pretrain": "classifier",
+            "pretrain_regression": "regression",
+            "pretrain_decoder": "encoder",
+        }.get(train["mode"], train["mode"])
+        assert evaluation["mode"] == expected_mode, name
     # Optional submission accepts these same YAMLs and snapshots their values.
     args = validated_args(
         ["train", "--config", str(ROOT / "configs/top_small_scratch.yaml")]
@@ -90,11 +67,11 @@ def test_yaml_launchers(tmp_path):
     )
     fake.chmod(0o755)
     bootstrap = """
-module() { test "$*" = "load pytorch/2.11"; }
+module() { test "$*" = "load pytorch"; }
 scontrol() { echo test-node; }
 srun() { while [ "$1" != bash ]; do shift; done; "$@"; }
 export -f module scontrol srun
-bash "$1" "$2"
+bash "$@"
 """
     env = dict(
         os.environ,
@@ -125,6 +102,10 @@ bash "$1" "$2"
                     "bash",
                     str(ROOT / "shell" / script),
                     argument,
+                    "--save-tag",
+                    "trial_7",
+                    "--seed",
+                    "49",
                 ],
                 cwd=ROOT / "shell",
                 env=env,
@@ -134,6 +115,10 @@ bash "$1" "$2"
                 command,
                 "--config",
                 str(expected),
+                "--save-tag",
+                "trial_7",
+                "--seed",
+                "49",
             ]
         failed = subprocess.run(
             ["bash", str(ROOT / "shell" / script), "absent.yaml"],

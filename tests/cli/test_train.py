@@ -10,6 +10,8 @@ runner = CliRunner()
 
 
 def invoke(args):
+    if "--num-workers" not in args:
+        args = [*args, "--num-workers", 0]
     result = runner.invoke(app, list(map(str, args)))
     assert result.exit_code == 0, f"{result.output}\n{result.exception}"
     return result
@@ -50,6 +52,7 @@ def test_train(test_dataset_name, test_dataset_path, tmp_path):
         "generator",
         "pretrain",
         "pretrain_regression",
+        "pretrain_decoder",
         "encoder",
         "segmentation",
         "ftag",
@@ -90,6 +93,8 @@ def test_all_modes_and_resume(mode, toy_local, tmp_path):
     ]
     if "regression" in mode:
         args += ["--num-classes", 1]
+    if mode == "segmentation":
+        args += ["--num-gen-classes", 4]
     if mode == "ftag":
         args += ["--num-gen-classes", 2]
     invoke(args)
@@ -190,6 +195,8 @@ def test_exact_resume(monkeypatch, toy_local, tmp_path):
         "--no-check-remote",
         "--mode",
         "pretrain",
+        "--num-workers",
+        0,
     ]
     full, resumed = tmp_path / "full", tmp_path / "resume"
     invoke([*args, "--output_dir", full])

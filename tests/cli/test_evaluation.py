@@ -1,5 +1,7 @@
 import h5py
 import numpy as np
+import pytest
+import torch
 from typer.testing import CliRunner
 
 from omnilearned.cli import app
@@ -80,14 +82,22 @@ def test_evaluation_order_and_generation_schema(toy_local, tmp_path):
         ]
     )
     files = sorted(output.glob("generated_gen*.h5"))
-    assert len(files) == 2
-    for file in files:
-        with h5py.File(file) as new, h5py.File(new.attrs["source_file"]) as old:
-            assert new["data"].shape == old["data"].shape
-            np.testing.assert_array_equal(new["pid"][:], old["pid"][:])
-            np.testing.assert_array_equal(new["global"][:], old["global"][:])
-            for row, count in enumerate((0, 1, 3, 5)):
-                assert np.count_nonzero(new["data"][row, count:]) == 0
+    assert len(files) == 1  # One streamed output per rank.
+    with h5py.File(files[0]) as new:
+        assert new["data"].shape == (8, 11, 4)
+        assert new["source_row"][:].tolist() == list(range(4)) * 2
+        for i, (filename, row) in enumerate(
+            zip(new["source_file"].asstr()[:], new["source_row"][:], strict=True)
+        ):
+            with h5py.File(filename) as old:
+                np.testing.assert_array_equal(new["pid"][i], old["pid"][row])
+                np.testing.assert_array_equal(new["global"][i], old["global"][row])
+                count = (0, 1, 3, 5)[row]
+                assert np.count_nonzero(new["data"][i, count:]) == 0
+                assert np.isfinite(new["data"][i]).all()
+                np.testing.assert_array_equal(
+                    new["data_pid"][i, : old["data"].shape[1]], old["data_pid"][row]
+                )
 
 
 def test_high_level(toy_local, tmp_path):
@@ -196,9 +206,41 @@ def test_auxiliary_feature_columns(toy_local, tmp_path):
             2,
         ]
     )
-    for file in output.glob("generated*.h5"):
-        with h5py.File(file) as new, h5py.File(new.attrs["source_file"]) as old:
-            x, y = new["data"][:], old["data"][:]
-            assert x.shape == y.shape
-            np.testing.assert_array_equal(x[..., 4:], y[..., 4:])
-            assert np.count_nonzero(x[y[..., 2] == 0]) == 0
+    files = list(output.glob("generated*.h5"))
+    assert len(files) == 1
+    with h5py.File(files[0]) as new:
+        assert new["data"].shape == (8, 11, 7)
+        for i, (filename, row) in enumerate(
+            zip(new["source_file"].asstr()[:], new["source_row"][:], strict=True)
+        ):
+            with h5py.File(filename) as old:
+                y = old["data"][row]
+                x = new["data"][i, : len(y)]
+                np.testing.assert_array_equal(x[..., 4:], y[..., 4:])
+                assert np.count_nonzero(x[y[..., 2] == 0]) == 0
+                assert np.count_nonzero(new["data"][i, len(y) :]) == 0
+
+
+@pytest.mark.parametrize("mode", ["encoder", "pretrain_decoder"])
+def test_checkpoint_token_count(mode, tmp_path):
+    from omnilearned.evaluate import load_for_evaluation
+    from omnilearned.runtime import make_model
+
+    config = dict(
+        size="lite",
+        num_feat=4,
+        num_tokens=3,
+        num_part=5,
+        mode=mode,
+        interaction=False,
+        local_interaction=False,
+    )
+    original = make_model(config).eval()
+    path = tmp_path / "checkpoint.pt"
+    torch.save({"config": config, "model": original.state_dict()}, path)
+    evaluation = dict(config, num_tokens=4, mode="encoder", checkpoint_path=str(path))
+    restored = load_for_evaluation(evaluation, "cpu")
+    assert restored.num_tokens == 3
+    x, y = torch.randn(2, 5, 4), torch.zeros(2)
+    with torch.no_grad():
+        torch.testing.assert_close(restored(x, y)["latent"], original(x, y)["latent"])

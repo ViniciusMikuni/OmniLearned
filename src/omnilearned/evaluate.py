@@ -81,7 +81,7 @@ def load_for_evaluation(c, device, high_level=False):
     )
     saved = torch.load(file, map_location="cpu", weights_only=False)
     architecture = (
-        "size num_feat num_part num_latent interaction local_interaction num_coord K "
+        "size num_feat num_part num_tokens interaction local_interaction num_coord K "
         "interaction_type conditional num_cond use_pid pid_idx pid_dim use_add "
         "num_add num_classes num_gen_classes qk_norm"
     ).split()
@@ -95,7 +95,7 @@ def load_for_evaluation(c, device, high_level=False):
                 c[key] = saved["config"][key]
 
     mode = saved.get("config", {}).get("mode")
-    if mode in ("pretrain", "pretrain_regression", "ftag"):
+    if mode in ("pretrain", "pretrain_regression", "pretrain_decoder", "ftag"):
         model_config["mode"] = mode
     model = make_model(model_config, high_level).to(device)
     use_ema = c.get("use_ema", True) and (c.get("mode") == "generator" or high_level)
