@@ -106,7 +106,9 @@ def load_for_evaluation(c, device, high_level=False):
 
 
 def model_inputs(batch):
-    return {k: batch[k] for k in ("cond", "pid", "add_info") if batch.get(k) is not None}
+    return {
+        k: batch[k] for k in ("cond", "pid", "add_info") if batch.get(k) is not None
+    }
 
 
 def generated_fields(source, row, prediction, i, counts, width, c):
@@ -121,26 +123,20 @@ def generated_fields(source, row, prediction, i, counts, width, c):
         )
         count = int(counts[i])
         positions = np.flatnonzero(fields["data"][0, :, 2] != 0)
-        positions = (
-            positions if len(positions) == count else np.arange(count)
-        )
+        positions = positions if len(positions) == count else np.arange(count)
         data[0][np.ix_(positions, layout.physical)] = (
             prediction[i, :count].cpu().numpy()
         )
         for column in (
             [layout.pid_idx] if layout.pid_idx is not None else []
         ) + layout.additional:
-            data[0, positions, column] = fields["data"][
-                0, positions, column
-            ]
+            data[0, positions, column] = fields["data"][0, positions, column]
         fields["data"] = data
     else:
         fields["data"] = prediction[i : i + 1].cpu().numpy()
 
     # Preserve the latent token count; only pad source particle arrays.
-    for key in (
-            ("data", "data_pid") if mode == "generator" else ("data_pid",)
-    ):
+    for key in ("data", "data_pid") if mode == "generator" else ("data_pid",):
         if key in fields and fields[key].ndim >= 2:
             value = fields[key]
             padded_value = np.zeros(
@@ -157,8 +153,10 @@ def run(**c):
     seed_everything(c.get("seed", 42) + rank)
     mode, sbi = c["mode"], c.get("sbi", False)
     if mode not in ("classifier", "regression", "segmentation", "generator", "encoder"):
-        raise ValueError("Use classifier evaluation for ftag; supported modes are "
-                         "classifier, regression, segmentation, generator and encoder")
+        raise ValueError(
+            "Use classifier evaluation for ftag; supported modes are "
+            "classifier, regression, segmentation, generator and encoder"
+        )
     if sbi and mode != "generator":
         raise ValueError("SBI requires generator mode")
     model = load_for_evaluation(c, device)
@@ -176,8 +174,14 @@ def run(**c):
         with ExitStack() as stack:
             spool = target = None
             for raw in BatchProgress(
-                loader, total=len(loader), desc="Evaluating", unit="batch",
-                disable=rank != 0, dynamic_ncols=True, miniters=1, mininterval=1.0,
+                loader,
+                total=len(loader),
+                desc="Evaluating",
+                unit="batch",
+                disable=rank != 0,
+                dynamic_ncols=True,
+                miniters=1,
+                mininterval=1.0,
             ):
                 if tabular and spool is None:
                     spool = stack.enter_context(h5py.File(outdir / f"{stem}.h5", "w"))
@@ -193,7 +197,9 @@ def run(**c):
                         prediction = model.classifier(body, mask=mask)
                         if mode == "classifier":
                             if c.get("use_event_loss"):
-                                results["event_prediction"] = prediction[:, 200:].softmax(-1).cpu()
+                                results["event_prediction"] = (
+                                    prediction[:, 200:].softmax(-1).cpu()
+                                )
                                 prediction = prediction[:, :200]
                             prediction = prediction.softmax(-1)
                     elif mode in ("segmentation", "encoder"):
@@ -204,13 +210,15 @@ def run(**c):
                             **model_inputs(batch),
                         )
                         prediction = (
-                            output["z_pred"] if mode == "segmentation" else output["latent"]
+                            output["z_pred"]
+                            if mode == "segmentation"
+                            else output["latent"]
                         )
                     else:
                         maximum = int(batch["stored_shape"][:, 0].max())
                         mult = dense["cond"][:, -1]
-                        if 'camels' in c["dataset"] or "quijote" in c["dataset"]:
-                            mult = maximum*torch.ones_like(mult)/100.
+                        if "camels" in c["dataset"] or "quijote" in c["dataset"]:
+                            mult = maximum * torch.ones_like(mult) / 100.0
                         counts = multiplicity_counts(mult, maximum)
                         if (counts > batch["stored_shape"][:, 0]).any():
                             raise ValueError(
@@ -255,16 +263,26 @@ def run(**c):
                                 device=device,
                             )
 
-                rows = list(zip(raw["file_id"].tolist(), raw["row_id"].tolist(), strict=True))
+                rows = list(
+                    zip(raw["file_id"].tolist(), raw["row_id"].tolist(), strict=True)
+                )
                 if mode == "segmentation":
-                    values = np.zeros((len(rows), width, prediction.shape[-1]), np.float32)
+                    values = np.zeros(
+                        (len(rows), width, prediction.shape[-1]), np.float32
+                    )
                     targets = np.zeros_like(values)
                     for i, (fid, row) in enumerate(rows):
                         start, stop = raw["offsets"][i : i + 2]
                         positions = raw["positions"][start:stop].numpy()
-                        values[i, positions] = prediction[i, :len(positions)].cpu().numpy()
-                        targets[i, positions] = loader.dataset._get_file(fid)["data_pid"][row][positions]
-                    results.update(prediction=values, pid=targets, lengths=raw["lengths"])
+                        values[i, positions] = (
+                            prediction[i, : len(positions)].cpu().numpy()
+                        )
+                        targets[i, positions] = loader.dataset._get_file(fid)[
+                            "data_pid"
+                        ][row][positions]
+                    results.update(
+                        prediction=values, pid=targets, lengths=raw["lengths"]
+                    )
                 elif tabular:
                     results.update(prediction=prediction.cpu(), pid=batch["y"].cpu())
                     conds = []
@@ -282,15 +300,24 @@ def run(**c):
                 for i, (fid, row) in enumerate(rows):
                     source = loader.dataset._get_file(fid)
                     if target is None:
-                        destination = outdir / f"generated_{c['save_tag']}_rank{rank}.h5"
+                        destination = (
+                            outdir / f"generated_{c['save_tag']}_rank{rank}.h5"
+                        )
                         target = stack.enter_context(h5py.File(destination, "w"))
                         target.attrs.update(source.attrs)
                     fields = generated_fields(
-                        source, row, prediction, i,
-                        counts if mode == "generator" else None, width, c,
+                        source,
+                        row,
+                        prediction,
+                        i,
+                        counts if mode == "generator" else None,
+                        width,
+                        c,
                     )
                     fields.update(
-                        source_file=np.asarray([sources[fid]], dtype=h5py.string_dtype()),
+                        source_file=np.asarray(
+                            [sources[fid]], dtype=h5py.string_dtype()
+                        ),
                         source_row=np.asarray([row], np.int64),
                     )
                     for name, value in fields.items():
@@ -299,7 +326,9 @@ def run(**c):
                             target[name].attrs.update(source[name].attrs)
             if spool is not None and "prediction" in spool:
                 if "cond" not in spool:
-                    spool.create_dataset("cond", data=np.empty((len(spool["prediction"]), 0), np.float32))
+                    spool.create_dataset(
+                        "cond", data=np.empty((len(spool["prediction"]), 0), np.float32)
+                    )
                 export_npz(spool, outdir / f"{stem}.npz")
         print(f"Evaluation complete: {outdir}")
     finally:

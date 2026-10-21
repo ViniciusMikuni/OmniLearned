@@ -44,8 +44,11 @@ def train(
         help="Number of Particles in the Point Cloud. Only necesssary for encoder training",
     ),
     num_tokens: int = typer.Option(
-        4, "--num_tokens", "--num-tokens", min=1,
-        help="Number of learned tokens, also the encoder latent token count"
+        4,
+        "--num_tokens",
+        "--num-tokens",
+        min=1,
+        help="Number of learned tokens, also the encoder latent token count",
     ),
     size: str = typer.Option("small", "--size", "-s", help="Model size"),
     interaction: bool = typer.Option(False, help="Use interaction matrix"),
@@ -70,7 +73,10 @@ def train(
     ),
     use_clip: bool = typer.Option(False, help="Use CLIP loss during training"),
     ot_iterations: int = typer.Option(
-        20, "--ot-iterations", "--ot_iterations", min=1,
+        20,
+        "--ot-iterations",
+        "--ot_iterations",
+        min=1,
         help="Sinkhorn iterations for each decoder reconstruction loss",
     ),
     use_event_loss: bool = typer.Option(
@@ -206,8 +212,11 @@ def evaluate(
         help="Number of Particles in the Point Cloud. Only necesssary for encoder training",
     ),
     num_tokens: int = typer.Option(
-        4, "--num_tokens", "--num-tokens", min=1,
-        help="Number of learned tokens, also the encoder latent token count"
+        4,
+        "--num_tokens",
+        "--num-tokens",
+        min=1,
+        help="Number of learned tokens, also the encoder latent token count",
     ),
     size: str = typer.Option("small", "--size", "-s", help="Model size"),
     interaction: bool = typer.Option(False, help="Use interaction matrix"),
@@ -239,7 +248,8 @@ def evaluate(
         1, help="Number of classes in the particle segmentation task"
     ),
     mode: str = typer.Option(
-        "classifier", help="Task to run: classifier, regression, segmentation, generator, encoder, decoder"
+        "classifier",
+        help="Task to run: classifier, regression, segmentation, generator, encoder, decoder",
     ),
     sbi: bool = typer.Option(
         False,

@@ -162,8 +162,10 @@ def emd_loss(
     log_a = torch.log(a + eps)
     log_b = torch.log(b + eps).masked_fill(mask_eff == 0, NEG)
 
-    return _transport_cost(C, log_a, log_b, valid_jet, blur, blur_start,
-                           n_iter, scaling, unroll)
+    return _transport_cost(
+        C, log_a, log_b, valid_jet, blur, blur_start, n_iter, scaling, unroll
+    )
+
 
 def sliced_wasserstein_loss(
     x_hat,
@@ -204,11 +206,7 @@ def sliced_wasserstein_loss(
         return x_hat.sum() * 0.0 + logits.sum() * 0.0
 
     with torch.autocast(device_type=x_hat.device.type, enabled=False):
-        dtype = (
-            torch.float64
-            if x_hat.dtype == torch.float64
-            else torch.float32
-        )
+        dtype = torch.float64 if x_hat.dtype == torch.float64 else torch.float32
 
         pred = x_hat[nonempty].to(dtype)
         valid = mask[nonempty]
@@ -219,14 +217,10 @@ def sliced_wasserstein_loss(
         # Normalize sigmoid probabilities without numerical underflow.
         pred_weights = F.logsigmoid(logits).softmax(dim=1)
         target_weights = valid.to(dtype)
-        target_weights = target_weights / target_weights.sum(
-            dim=1, keepdim=True
-        )
+        target_weights = target_weights / target_weights.sum(dim=1, keepdim=True)
 
         if projections is None:
-            directions = torch.randn(
-                D, n_projections, device=pred.device, dtype=dtype
-            )
+            directions = torch.randn(D, n_projections, device=pred.device, dtype=dtype)
         else:
             directions = projections.to(device=pred.device, dtype=dtype)
             if (
@@ -242,12 +236,8 @@ def sliced_wasserstein_loss(
         directions = directions / norms
 
         # Merge the projected supports of the two distributions.
-        positions = torch.cat(
-            (pred @ directions, target @ directions), dim=1
-        )
-        signed_weights = torch.cat(
-            (pred_weights, -target_weights), dim=1
-        )
+        positions = torch.cat((pred @ directions, target @ directions), dim=1)
+        signed_weights = torch.cat((pred_weights, -target_weights), dim=1)
         signed_weights = signed_weights[..., None].expand_as(positions)
 
         positions, order = positions.sort(dim=1)
@@ -257,12 +247,12 @@ def sliced_wasserstein_loss(
         cdf_difference = signed_weights.cumsum(dim=1)[:, :-1]
         interval_widths = positions[:, 1:] - positions[:, :-1]
 
-        return (
-            cdf_difference.abs() * interval_widths
-        ).sum(dim=1).mean()
+        return (cdf_difference.abs() * interval_widths).sum(dim=1).mean()
 
-def _transport_cost(C, log_a, log_b, valid_jet, blur, blur_start,
-                    n_iter, scaling, unroll):
+
+def _transport_cost(
+    C, log_a, log_b, valid_jet, blur, blur_start, n_iter, scaling, unroll
+):
     """Shared annealed Sinkhorn solve; returns the transport part of the cost."""
     eps_final = float(blur)
     if blur_start is None:
@@ -325,7 +315,7 @@ def _transport_cost(C, log_a, log_b, valid_jet, blur, blur_start,
 
     cost = torch.where(valid_jet, cost, torch.zeros_like(cost))
     return cost.sum() / valid_jet.sum().clamp_min(1)
-    
+
 
 def shadow_copy(model):
     ema_model = deepcopy(model).eval()
@@ -467,8 +457,12 @@ def get_loss(
     if outputs.get("x_hat") is not None:
         counts = mask.sum(1)
         with torch.autocast(device_type=outputs["x"].device.type, enabled=False):
-            args = (outputs["x_hat"].float(), outputs["x"].float(),
-                    mask.unsqueeze(-1), outputs["mask_logits"].float())
+            args = (
+                outputs["x_hat"].float(),
+                outputs["x"].float(),
+                mask.unsqueeze(-1),
+                outputs["mask_logits"].float(),
+            )
             reconstruction_emd = emd_loss(*args)
             reconstruction_ot = sliced_wasserstein_loss(*args)
         reconstruction = reconstruction_emd + reconstruction_ot

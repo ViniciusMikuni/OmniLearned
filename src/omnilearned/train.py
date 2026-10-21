@@ -149,7 +149,16 @@ def pass_epoch(
         for k, v in logs.items():
             totals[k] = totals.get(k, 0.0) + float(v) * count
         n_events += count
-    keys = ["loss", "loss_class", "loss_perturbed", "loss_gen", "loss_clip", "loss_ae", "loss_emd", "loss_ot"]
+    keys = [
+        "loss",
+        "loss_class",
+        "loss_perturbed",
+        "loss_gen",
+        "loss_clip",
+        "loss_ae",
+        "loss_emd",
+        "loss_ot",
+    ]
     values = torch.tensor(
         [totals.get(k, 0.0) for k in keys] + [n_events],
         device=device,
@@ -375,12 +384,17 @@ def run(high_level=False, **c):
                 f"Class Loss: {train_logs['loss_class']:.4f}, "
                 f"Class Val Loss: {val_logs['loss_class']:.4f}"
             )
-            if c.get("mode") in ("pretrain", "pretrain_regression","pretrain_decoder"):
+            if c.get("mode") in ("pretrain", "pretrain_regression", "pretrain_decoder"):
                 print(
                     f"Perturbed Loss: {train_logs['loss_perturbed']:.4f}, "
                     f"Perturbed Val Loss: {val_logs['loss_perturbed']:.4f}"
                 )
-            if c.get("mode") in ("pretrain", "pretrain_regression","pretrain_decoder","generator"):
+            if c.get("mode") in (
+                "pretrain",
+                "pretrain_regression",
+                "pretrain_decoder",
+                "generator",
+            ):
                 print(
                     f"Gen Loss: {train_logs['loss_gen']:.4f}, "
                     f"Gen Val Loss: {val_logs['loss_gen']:.4f}"
@@ -390,7 +404,7 @@ def run(high_level=False, **c):
                     f"CLIP Loss: {train_logs['loss_clip']:.4f}, "
                     f"CLIP Val Loss: {val_logs['loss_clip']:.4f}"
                 )
-            if c.get("mode") in ["encoder","pretrain_decoder"]:
+            if c.get("mode") in ["encoder", "pretrain_decoder"]:
                 print(
                     f"AE Loss: {train_logs['loss_ae']:.4f}, "
                     f"AE Val Loss: {val_logs['loss_ae']:.4f} | "

@@ -69,8 +69,8 @@ def test_order_and_batched_reads(toy_local):
     assert [s["row_id"] for s in samples] == [1, 1, 1, 0]
 
 
-@pytest.mark.parametrize('split', ['train', 'val', 'test'])
-@pytest.mark.parametrize('mode', ['classifier', 'pretrain', 'pretrain_regression'])
+@pytest.mark.parametrize("split", ["train", "val", "test"])
+@pytest.mark.parametrize("mode", ["classifier", "pretrain", "pretrain_regression"])
 def test_labels_match_upstream(tmp_path, split, mode):
     import numpy as np
     import torch
@@ -83,20 +83,35 @@ def test_labels_match_upstream(tmp_path, split, mode):
         folder.mkdir(parents=True)
         labels = np.array([0, 1]) + LABEL_OFFSETS.get(name, 0)
         expected.extend(labels.tolist())
-        with h5py.File(folder / 'events.h5', 'w') as f:
-            f['data'] = np.ones((2, 3, 4), dtype=np.float32)
-            f['pid'] = labels
-    loader = load_data('pretrain', tmp_path, dataset_type=split, mode=mode,
-                       batch=3, shuffle=False, check_remote=False)
-    actual = torch.cat([b['y'] for b in loader]).tolist()
+        with h5py.File(folder / "events.h5", "w") as f:
+            f["data"] = np.ones((2, 3, 4), dtype=np.float32)
+            f["pid"] = labels
+    loader = load_data(
+        "pretrain",
+        tmp_path,
+        dataset_type=split,
+        mode=mode,
+        batch=3,
+        shuffle=False,
+        check_remote=False,
+    )
+    actual = torch.cat([b["y"] for b in loader]).tolist()
     assert actual == expected
     assert min(actual) >= 0 and max(actual) < 210
     loader.dataset.close()
     for name in PRETRAIN_DATASETS:
-        single = load_data(name, tmp_path, dataset_type=split, mode=mode,
-                          batch=2, shuffle=False, check_remote=False)
-        assert next(iter(single))['y'].tolist() == [0, 1]
+        single = load_data(
+            name,
+            tmp_path,
+            dataset_type=split,
+            mode=mode,
+            batch=2,
+            shuffle=False,
+            check_remote=False,
+        )
+        assert next(iter(single))["y"].tolist() == [0, 1]
         single.dataset.close()
-        with h5py.File(tmp_path / name / split / 'events.h5') as f:
+        with h5py.File(tmp_path / name / split / "events.h5") as f:
             np.testing.assert_array_equal(
-                f['pid'][:], np.array([0, 1]) + LABEL_OFFSETS.get(name, 0))
+                f["pid"][:], np.array([0, 1]) + LABEL_OFFSETS.get(name, 0)
+            )

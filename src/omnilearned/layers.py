@@ -125,6 +125,7 @@ def get_kt(xi, xj, mask, is_log=False):
     else:
         return kt
 
+
 def _ot_block(left, right, la, lb, epsilon, n_iters, gram=None):
     if gram is None:
         cost = (1 - torch.einsum("bikf,bjlf->bijkl", left, right)).clamp_min(0)
@@ -141,22 +142,17 @@ def _ot_block(left, right, la, lb, epsilon, n_iters, gram=None):
     v = torch.zeros_like(kernel[..., :1, :])
 
     for _ in range(n_iters):
-        u = la[:, :, None, :, None] - torch.logsumexp(
-            kernel + v, dim=-1, keepdim=True
-        )
-        v = lb[:, None, :, None, :] - torch.logsumexp(
-            kernel + u, dim=-2, keepdim=True
-        )
+        u = la[:, :, None, :, None] - torch.logsumexp(kernel + v, dim=-1, keepdim=True)
+        v = lb[:, None, :, None, :] - torch.logsumexp(kernel + u, dim=-2, keepdim=True)
 
     plan = (kernel + u + v).exp()
     rows = plan.sum(dim=-1)
     cols = plan.sum(dim=-2)
 
     return epsilon * (
-        (u.squeeze(-1) * rows).sum(-1)
-        + (v.squeeze(-2) * cols).sum(-1)
-        - rows.sum(-1)
+        (u.squeeze(-1) * rows).sum(-1) + (v.squeeze(-2) * cols).sum(-1) - rows.sum(-1)
     )
+
 
 def _debias(distance):
     """Symmetric, self-debiased entropic OT; clip finite-iteration negatives."""
@@ -221,8 +217,13 @@ def get_ot(
             columns = []
             for j in chunks:
                 args = (
-                    values[:, i], values[:, j], log_weights[:, i], log_weights[:, j],
-                    epsilon, n_iters, gram,
+                    values[:, i],
+                    values[:, j],
+                    log_weights[:, i],
+                    log_weights[:, j],
+                    epsilon,
+                    n_iters,
+                    gram,
                 )
                 columns.append(_ot_block(*args))
             rows.append(torch.cat(columns, dim=2))
@@ -242,11 +243,11 @@ def get_ot(
 
     full = _debias(absolute(x, neighbors))
     # Subtract in the original dtype, matching the old implementation.
-    relative = _debias(distance(
-        F.normalize((x.unsqueeze(2) - neighbors).float(), dim=-1, eps=1e-12)
-    ))
+    relative = _debias(
+        distance(F.normalize((x.unsqueeze(2) - neighbors).float(), dim=-1, eps=1e-12))
+    )
     geometric = _debias(absolute(x[..., :3], neighbors[..., :3]))
-    
+
     result = torch.stack((full, relative, geometric), dim=-1)
     if is_log:
         result = result.clamp_min(1e-12).log()

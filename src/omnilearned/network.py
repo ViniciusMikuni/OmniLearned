@@ -97,7 +97,8 @@ class PET2(nn.Module):
             pid_dim=pid_dim,
             add_info=add_info,
             add_dim=add_dim,
-            use_time=self.mode in ["generator", "pretrain", "pretrain_regression","pretrain_decoder"],
+            use_time=self.mode
+            in ["generator", "pretrain", "pretrain_regression", "pretrain_decoder"],
             skip=skip,
             num_coord=num_coord,
             use_local=use_local,
@@ -143,9 +144,7 @@ class PET2(nn.Module):
 
         if use_generator:
             self.generator = PET_generator(
-                num_gen_classes
-                if self.mode in ("segmentation", "ftag")
-                else input_dim,
+                num_gen_classes if self.mode in ("segmentation", "ftag") else input_dim,
                 base_dim,
                 num_transformers=num_transformers_head,
                 num_heads=num_heads,
@@ -164,7 +163,7 @@ class PET2(nn.Module):
                 use_attn=use_attn,
             )
 
-        if self.mode in ["encoder","pretrain_decoder"]:
+        if self.mode in ["encoder", "pretrain_decoder"]:
             self.decoder = PET_decoder(
                 input_dim,
                 base_dim,
@@ -226,7 +225,12 @@ class PET2(nn.Module):
         # time = torch.rand(size=(x.shape[0],)).to(x.device)
         _, alpha, sigma = get_logsnr_alpha_sigma(time)
 
-        if self.mode in ["generator", "pretrain","pretrain_decoder", "pretrain_regression"]:
+        if self.mode in [
+            "generator",
+            "pretrain",
+            "pretrain_decoder",
+            "pretrain_regression",
+        ]:
             z, v, v_weight = perturb(x, time, self.dataset, mask=mask)
             z_body, body_mask = self.body(
                 z, cond, pid, add_info, time, mask=mask, return_mask=True
@@ -262,11 +266,13 @@ class PET2(nn.Module):
                 "ftag",
             ]:
                 y_pred = self.classifier(x_body, mask=body_mask)
-            if self.mode in ["pretrain","pretrain_decoder", "pretrain_regression"]:
+            if self.mode in ["pretrain", "pretrain_decoder", "pretrain_regression"]:
                 y_perturb = self.classifier(z_body, mask=body_mask)
-            if self.mode in ["encoder","pretrain_decoder"]:                
-                latent = self.encoder_norm(self.encoder_mlp(x_body[:, :self.num_tokens]))
-                #z = latent + 0.05 * torch.randn_like(latent)
+            if self.mode in ["encoder", "pretrain_decoder"]:
+                latent = self.encoder_norm(
+                    self.encoder_mlp(x_body[:, : self.num_tokens])
+                )
+                # z = latent + 0.05 * torch.randn_like(latent)
                 x_hat, mask_logits = self.decoder(latent)
             if self.mode == "ftag" or self.mode == "segmentation":
                 z_pred = self.generator(x_body, y, mask=body_mask)
@@ -305,7 +311,7 @@ class PET_decoder(nn.Module):
         attn_drop=0.1,
     ):
         super().__init__()
-        
+
         self.input_dim = input_dim
         self.base_dim = base_dim
         self.num_particles = num_particles
@@ -718,7 +724,7 @@ class PET_body(nn.Module):
                         attn_drop=attn_drop,
                         mlp_drop=mlp_drop,
                         act_layer=act_layer,
-                        norm_layer=norm_layer,                        
+                        norm_layer=norm_layer,
                         skip=False,
                         use_int=use_int,
                         use_attn=use_attn,
