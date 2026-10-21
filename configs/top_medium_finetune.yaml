@@ -1,0 +1,24 @@
+# From shell/: ./run.sh top_medium_finetune.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: false
+size: medium
+num_workers: 4
+persistent_workers: false
+check_remote: false
+ema: false
+dataset: top
+mode: classifier
+num_classes: 2
+interaction: true
+local_interaction: true
+batch: 32
+epoch: 10
+lr: 1.0e-05
+wd: 0.0
+save_tag: top_medium_finetune
+fine_tune: true
+pretrain_tag: pretrain_medium
+lr_factor: 5.0
+freeze: false
+wandb: false

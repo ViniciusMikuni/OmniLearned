@@ -1,0 +1,21 @@
+# From shell/: ./run.sh top_small_pretrain.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: false
+size: small
+persistent_workers: false
+check_remote: false
+ema: false
+dataset: top
+mode: pretrain_decoder
+num_classes: 2
+interaction: true
+local_interaction: true
+batch: 64
+epoch: 15
+lr: 0.0005
+wd: 0.5
+save_tag: top_small_scratch
+freeze: false
+lr_factor: 1.0
+wandb: false

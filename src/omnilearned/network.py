@@ -1,18 +1,21 @@
 import torch
-import torch.nn as nn
+from torch import nn
+from torch.utils.checkpoint import checkpoint
 
-
+from omnilearned.attention import Attention
+from omnilearned.diffusion import MPFourier, get_logsnr_alpha_sigma, perturb
 from omnilearned.layers import (
-    NoScaleDropout,
-    InteractionBlock,
-    LocalEmbeddingBlock,
     MLP,
     AttBlock,
     DynamicTanh,
     InputBlock,
+    InteractionBlock,
+    LocalEmbeddingBlock,
+    NoScaleDropout,
     TokenAttBlock,
 )
-from omnilearned.diffusion import MPFourier, perturb, get_logsnr_alpha_sigma
+from omnilearned.neighbors import knn
+from omnilearned.packing import offsets_from_mask, padded
 
 
 class PET2(nn.Module):
@@ -47,11 +50,15 @@ class PET2(nn.Module):
         num_coord=3,
         use_local=True,
         use_attn=True,
-        num_particles=150,
-        num_latent=10,
+        num_particles=30,
         dataset="top",
+        qk_norm=False,
+        attention_backend="auto",
+        activation_checkpointing=False,
     ):
         super().__init__()
+        if type(num_tokens) is not int or num_tokens < 1:
+            raise ValueError("num_tokens must be a positive integer")
         self.mode = mode
         if self.mode not in [
             "classifier",
@@ -60,6 +67,8 @@ class PET2(nn.Module):
             "segmentation",
             "ftag",
             "pretrain",
+            "pretrain_regression",
+            "pretrain_decoder",
             "encoder",
         ]:
             raise ValueError(f"Mode '{self.mode}' not supported.")
@@ -88,7 +97,8 @@ class PET2(nn.Module):
             pid_dim=pid_dim,
             add_info=add_info,
             add_dim=add_dim,
-            use_time=self.mode in ["generator", "pretrain"],
+            use_time=self.mode
+            in ["generator", "pretrain", "pretrain_regression", "pretrain_decoder"],
             skip=skip,
             num_coord=num_coord,
             use_local=use_local,
@@ -105,13 +115,16 @@ class PET2(nn.Module):
             "ftag",
             "regression",
             "pretrain",
-            "encoder",
+            "pretrain_regression",
+            "pretrain_decoder",
         ]
         use_generator = self.mode in [
             "generator",
             "segmentation",
             "ftag",
             "pretrain",
+            "pretrain_decoder",
+            "pretrain_regression",
         ]
 
         if use_classifier:
@@ -125,15 +138,13 @@ class PET2(nn.Module):
                 mlp_drop=mlp_drop,
                 attn_drop=attn_drop,
                 num_tokens=num_tokens,
-                num_classes=num_classes if self.mode != "encoder" else num_latent,
+                num_classes=num_classes,
                 use_attn=use_attn,
             )
 
         if use_generator:
             self.generator = PET_generator(
-                input_dim
-                if num_gen_classes == 1
-                else num_gen_classes,  # diffusion or segmentation
+                num_gen_classes if self.mode in ("segmentation", "ftag") else input_dim,
                 base_dim,
                 num_transformers=num_transformers_head,
                 num_heads=num_heads,
@@ -145,13 +156,16 @@ class PET2(nn.Module):
                 num_tokens=num_tokens,
                 num_add=self.num_add,
                 num_classes=num_classes,
-                skip_pid=(num_classes == 1) | (self.mode == "segmentation"),
+                skip_pid=(num_classes == 1)
+                | (self.mode == "segmentation")
+                | (self.mode == "pretrain_regression")
+                | (self.mode == "ftag"),
                 use_attn=use_attn,
             )
 
-        if self.mode == "encoder":
+        if self.mode in ["encoder", "pretrain_decoder"]:
             self.decoder = PET_decoder(
-                num_latent,
+                input_dim,
                 base_dim,
                 num_particles=num_particles,
                 num_features=input_dim,
@@ -162,12 +176,22 @@ class PET2(nn.Module):
                 act_layer=act_layer,
                 mlp_drop=mlp_drop,
                 attn_drop=attn_drop,
-                num_classes=num_classes,
-                skip_pid=(num_classes == 1),
-                # (num_classes == 1),
             )
-            self.encoder_norm = nn.LayerNorm(num_latent)
+            self.encoder_mlp = MLP(
+                base_dim,
+                int(mlp_ratio * base_dim),
+                out_features=input_dim,
+                act_layer=act_layer,
+                drop=mlp_drop,
+            )
+            self.encoder_norm = nn.LayerNorm(input_dim)
 
+        self.body.activation_checkpointing = activation_checkpointing
+        for module in self.modules():
+            if isinstance(module, Attention):
+                module.backend = attention_backend
+                if qk_norm:
+                    module.enable_qk_norm()
         self.initialize_weights()
 
     def initialize_weights(self):
@@ -183,47 +207,75 @@ class PET2(nn.Module):
         # Specify parameters that should not be decayed
         return {"norm", "token"}
 
-    def forward(self, x, y, cond=None, pid=None, add_info=None):
-        (
-            y_pred,
-            y_perturb,
-            z_pred,
-            v,
-            v_weight,
-            x_body,
-            z_body,
-            x_hat,
-            mask_logits,
-            latent,
-        ) = (None, None, None, None, None, None, None, None, None, None)
+    def forward(
+        self, x, y, cond=None, pid=None, add_info=None, offsets=None, mask=None
+    ):
+        if offsets is not None:
+            x, mask = padded(x, offsets)
+            pid = padded(pid, offsets)[0] if pid is not None else None
+            add_info = padded(add_info, offsets)[0] if add_info is not None else None
+        if mask is None:
+            mask = x[..., 2:3] != 0
+        x = torch.where(mask, x, 0.0)
+        y_pred = y_perturb = z_pred = v = v_weight = x_body = z_body = x_hat = (
+            mask_logits
+        ) = latent = None
 
-        time = torch.rand(size=(x.shape[0],)).to(x.device)
+        time = torch.sigmoid(torch.randn(x.shape[0], device=x.device))
+        # time = torch.rand(size=(x.shape[0],)).to(x.device)
         _, alpha, sigma = get_logsnr_alpha_sigma(time)
 
-        if self.mode in ["generator", "pretrain"]:
-            z, v, v_weight = perturb(x, time, self.dataset)
-            z_body = self.body(z, cond, pid, add_info, time)
-            z_pred = self.generator(z_body, y.int())
+        if self.mode in [
+            "generator",
+            "pretrain",
+            "pretrain_decoder",
+            "pretrain_regression",
+        ]:
+            z, v, v_weight = perturb(x, time, self.dataset, mask=mask)
+            z_body, body_mask = self.body(
+                z, cond, pid, add_info, time, mask=mask, return_mask=True
+            )
+            z_pred = self.generator(z_body, y.long(), mask=body_mask)
 
         if self.mode in [
             "classifier",
             "regression",
             "segmentation",
             "pretrain",
+            "pretrain_decoder",
+            "pretrain_regression",
             "ftag",
             "encoder",
         ]:
-            x_body = self.body(x, cond, pid, add_info, torch.zeros_like(time))
+            x_body, body_mask = self.body(
+                x,
+                cond,
+                pid,
+                add_info,
+                torch.zeros_like(time),
+                mask=mask,
+                return_mask=True,
+            )
 
-            if self.mode in ["classifier", "pretrain", "regression", "ftag"]:
-                y_pred = self.classifier(x_body)
-            if self.mode == "pretrain":
-                y_perturb = self.classifier(z_body)
-            if self.mode == "encoder":
-                latent = self.encoder_norm(self.classifier(x_body))
-                x_hat, mask_logits = self.decoder(latent, y.int())
+            if self.mode in [
+                "classifier",
+                "pretrain",
+                "regression",
+                "pretrain_regression",
+                "pretrain_decoder",
+                "ftag",
+            ]:
+                y_pred = self.classifier(x_body, mask=body_mask)
+            if self.mode in ["pretrain", "pretrain_decoder", "pretrain_regression"]:
+                y_perturb = self.classifier(z_body, mask=body_mask)
+            if self.mode in ["encoder", "pretrain_decoder"]:
+                latent = self.encoder_norm(
+                    self.encoder_mlp(x_body[:, : self.num_tokens])
+                )
+                # z = latent + 0.05 * torch.randn_like(latent)
+                x_hat, mask_logits = self.decoder(latent)
             if self.mode == "ftag" or self.mode == "segmentation":
-                z_pred = self.generator(x_body, y)
+                z_pred = self.generator(x_body, y, mask=body_mask)
 
         return {
             "y_pred": y_pred,
@@ -238,6 +290,8 @@ class PET2(nn.Module):
             "x": x,
             "mask_logits": mask_logits,
             "latent": latent,
+            "mask": mask,
+            "body_mask": body_mask,
         }
 
 
@@ -255,37 +309,20 @@ class PET_decoder(nn.Module):
         act_layer=nn.GELU,
         mlp_drop=0.1,
         attn_drop=0.1,
-        num_context_tokens=4,
-        num_classes=2,
-        skip_pid=False,
     ):
         super().__init__()
 
-        self.base_dim = base_dim
         self.input_dim = input_dim
+        self.base_dim = base_dim
         self.num_particles = num_particles
         self.num_features = num_features
-        self.num_context_tokens = num_context_tokens
-        self.skip_pid = skip_pid
-
-        if not self.skip_pid:
-            self.pid_embed = nn.Sequential(
-                nn.Embedding(num_classes, base_dim),
-                MLP(
-                    base_dim,
-                    int(mlp_ratio * base_dim),
-                    out_features=base_dim,
-                    act_layer=act_layer,
-                    drop=mlp_drop,
-                ),
-            )
 
         self.input_proj = nn.Linear(
             input_dim,
-            num_context_tokens * base_dim,
+            base_dim,
         )
 
-        self.particle_queries = nn.Parameter(torch.zeros(1, num_particles, base_dim))
+        self.particle_token = nn.Parameter(torch.zeros(1, num_particles, base_dim))
 
         self.in_blocks = nn.ModuleList(
             [
@@ -324,22 +361,13 @@ class PET_decoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
         self.apply(_init_weights)
-        nn.init.normal_(self.particle_queries, std=0.02)
+        nn.init.normal_(self.particle_token, std=0.02)
 
-    def forward(self, c, y=None):
+    def forward(self, c):
         B = c.shape[0]
-
         context = self.input_proj(c)
-        context = context.reshape(
-            B,
-            self.num_context_tokens,
-            self.base_dim,
-        )
 
-        if not self.skip_pid and y is not None:
-            x = torch.cat([self.pid_embed(y).unsqueeze(1), context], 1)
-
-        particles = self.particle_queries.expand(B, -1, -1)
+        particles = self.particle_token.expand(B, -1, -1)
 
         # particle tokens first, because TokenAttBlock updates first num_tokens
         x = torch.cat([particles, context], dim=1)
@@ -412,11 +440,13 @@ class PET_classifier(nn.Module):
 
         self.apply(_init_weights)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         B = x.shape[0]
-        mask = x[:, self.num_tokens :, 2:3] != 0
+        if mask is None:
+            raise ValueError("Classifier requires the explicit body mask")
+        mask = mask[:, self.num_tokens :]
 
-        for ib, blk in enumerate(self.in_blocks):
+        for blk in self.in_blocks:
             x = blk(x, mask=mask)
 
         x = self.fc(x[:, : self.num_tokens].reshape(B, -1))
@@ -470,7 +500,6 @@ class PET_generator(nn.Module):
                     mlp_drop=mlp_drop,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                    num_tokens=num_tokens,
                     skip=False,
                     use_int=False,
                     use_attn=use_attn,
@@ -500,15 +529,15 @@ class PET_generator(nn.Module):
 
         self.apply(_init_weights)
 
-    def forward(self, x, y=None):
-        # Add tokens and label embedding
-        mask = x[:, :, 2:3] != 0
+    def forward(self, x, y=None, mask=None):
+        if mask is None:
+            raise ValueError("Generator requires the explicit body mask")
 
         if not self.skip_pid and y is not None:
             mask = torch.cat([torch.ones_like(mask[:, :1]), mask], 1)
             x = torch.cat([self.pid_embed(y).unsqueeze(1), x], 1) * mask
 
-        for ib, blk in enumerate(self.in_blocks):
+        for blk in self.in_blocks:
             x = blk(x, mask=mask)
         x = (
             self.fc(x[:, self.num_add + self.num_tokens :])
@@ -551,9 +580,11 @@ class PET_body(nn.Module):
     ):
         super().__init__()
         self.input_dim = input_dim
-        self.use_int = use_int
+        self.use_int = use_int and use_attn
         self.use_time = use_time
         self.use_local = use_local
+        self.activation_checkpointing = False
+        self.K = K
         self.conditional = conditional
         self.pid = pid
         self.add_info = add_info
@@ -593,9 +624,6 @@ class PET_body(nn.Module):
                 int_type=int_type,
                 num_transformers=num_transf_local,
                 feature_drop=feature_drop,
-            )
-            self.local_drop = (
-                NoScaleDropout(feature_drop) if feature_drop > 0.0 else nn.Identity()
             )
 
         self.num_add = 0
@@ -660,9 +688,9 @@ class PET_body(nn.Module):
                         mlp_drop=mlp_drop,
                         act_layer=act_layer,
                         norm_layer=norm_layer,
-                        num_tokens=num_tokens + self.num_add,
                         skip=False,
                         use_int=use_int,
+                        use_attn=use_attn,
                     )
                     for _ in range(num_transformers // 2)
                 ]
@@ -678,9 +706,9 @@ class PET_body(nn.Module):
                         mlp_drop=mlp_drop,
                         act_layer=act_layer,
                         norm_layer=norm_layer,
-                        num_tokens=num_tokens + self.num_add,
                         skip=True,
                         use_int=use_int,
+                        use_attn=use_attn,
                     )
                     for _ in range(num_transformers // 2)
                 ]
@@ -697,9 +725,9 @@ class PET_body(nn.Module):
                         mlp_drop=mlp_drop,
                         act_layer=act_layer,
                         norm_layer=norm_layer,
-                        num_tokens=num_tokens + self.num_add,
                         skip=False,
                         use_int=use_int,
+                        use_attn=use_attn,
                     )
                     for _ in range(num_transformers)
                 ]
@@ -719,28 +747,45 @@ class PET_body(nn.Module):
 
         self.apply(_init_weights)
 
-    def forward(self, x, cond=None, pid=None, add_info=None, time=None):
+    def forward(
+        self,
+        x,
+        cond=None,
+        pid=None,
+        add_info=None,
+        time=None,
+        mask=None,
+        return_mask=False,
+    ):
         B = x.shape[0]
-        mask = x[:, :, 2:3] != 0
+        mask = x[:, :, 2:3] != 0 if mask is None else mask.bool()
+        x = torch.where(mask, x, 0.0)
+        if self.conditional and cond is None:
+            raise ValueError("Conditional model requires global features")
+        if self.use_time and time is None:
+            time = x.new_zeros(B)
         token = self.token.expand(B, -1, -1)
 
         x_embed, x = self.embed(x, mask)
 
         # Move away zero-padded entries
-        coord_shift = 999.0 * (~mask).float()
+        indices = None
         if self.use_local:
             local_features, indices = self.local_physics(
-                coord_shift + x[:, :, : self.num_coord], x, mask
+                x[:, :, : self.num_coord], x, mask
             )
 
         x_int = None
         if self.use_int:
+            if self.interaction.int_type == "ot" and indices is None:
+                indices, _ = knn(x[:, :, : self.num_coord], mask, self.K)
             x_int = self.interaction(x, mask, indices)
 
         x = x_embed
+
         if self.use_local:
             # Combine local + global info
-            x = x + self.local_drop(local_features)
+            x = x + local_features
 
         # Add classification tokens
         if pid is not None and self.pid:
@@ -759,36 +804,48 @@ class PET_body(nn.Module):
 
         x = torch.cat([token, x], 1)
 
-        # Create a new mask based on the updated point cloud with additional tokens
-        mask = x[:, :, 2:3] != 0
-
-        attn_mask = mask.float() @ mask.float().transpose(-1, -2)
-        attn_mask = ~(attn_mask.bool()).repeat_interleave(self.num_heads, dim=0)
-        attn_mask = attn_mask.float() * -1e9
-
+        prefix = self.num_tokens + self.num_add
+        mask = torch.cat(
+            (torch.ones((B, prefix, 1), device=x.device, dtype=torch.bool), mask), 1
+        )
+        attn_mask = None
         if self.use_int:
-            # Add the information of the interaction matrix
-            attn_mask[
-                :, self.num_tokens + self.num_add :, self.num_tokens + self.num_add :
-            ] = (
-                x_int
-                + attn_mask[
-                    :,
-                    self.num_tokens + self.num_add :,
-                    self.num_tokens + self.num_add :,
-                ]
+            attn_mask = x.new_zeros((B * self.num_heads, x.shape[1], x.shape[1]))
+            attn_mask[:, prefix:, prefix:] = x_int
+            attn_mask = attn_mask.view(B, self.num_heads, x.shape[1], x.shape[1])
+            attn_mask = attn_mask.masked_fill(
+                ~mask.squeeze(-1)[:, None, None, :], -torch.inf
+            )
+        dense_mask, dense_shape = mask, x.shape
+        offsets = None
+        if attn_mask is None:
+            offsets = offsets_from_mask(mask)
+            x = x[mask.squeeze(-1)]
+            mask = torch.ones_like(x[:, :1], dtype=torch.bool)
+
+        def apply_block(block, value, skip=None):
+            if self.activation_checkpointing and self.training:
+                return checkpoint(
+                    block, value, mask, attn_mask, skip, offsets, use_reentrant=False
+                )
+            return block(
+                value, mask=mask, attn_mask=attn_mask, skip=skip, offsets=offsets
             )
 
         skips = []
-        for ib, blk in enumerate(self.in_blocks):
-            x = blk(x, mask=mask, attn_mask=attn_mask)
-            skips.append(x)
+        for blk in self.in_blocks:
+            x = apply_block(blk, x)
+            if self.skip:
+                skips.append(x)
         if self.skip:
-            for ib, blk in enumerate(self.out_blocks):
-                x = blk(x, mask=mask, attn_mask=attn_mask, skip=skips.pop())
-
+            for blk in self.out_blocks:
+                x = apply_block(blk, x, skips.pop())
         x = self.norm(x) * mask
-        return x
+        if offsets is not None:
+            dense = x.new_zeros(dense_shape)
+            dense[dense_mask.squeeze(-1)] = x
+            x = dense
+        return (x, dense_mask) if return_mask else x
 
 
 class MLPGEN(nn.Module):
@@ -847,9 +904,10 @@ class MLPGEN(nn.Module):
 
     def forward(self, z, time, cond=None):
         z = self.embed(z)
-        z = z + self.cond(cond)
+        if cond is not None:
+            z = z + self.cond(cond)
         z = torch.cat([self.time_embed(self.MPFourier(time)), z], 1)
-        for ib, blk in enumerate(self.in_blocks):
+        for blk in self.in_blocks:
             z = blk(z)
         z = self.out(z)
         return z

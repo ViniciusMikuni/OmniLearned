@@ -1,0 +1,20 @@
+# From shell/: ./evaluate.sh evaluate_microboone_small_finetune_ot.yaml
+# Checkpoint: best_model_microboone_small_finetune_ot.pt
+dataset: microboone
+num_feat: 4
+size: small
+local_interaction: false
+num_coord: 3
+K: 10
+interaction_type: ot
+num_classes: 2
+mode: classifier
+batch: 32
+#save_tag: microboone_small_finetune_ot
+interaction: true
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: false
+check_remote: false
+num_workers: 2
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

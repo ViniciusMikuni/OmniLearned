@@ -1,25 +1,10 @@
-import torch
-import torch.nn as nn
 import einops
+import torch
+import torch.nn.functional as F
+from torch import nn
 
-
-class LayerScale(nn.Module):
-    def __init__(self, projection_dim, init_values=1e-3, channels_last=True):
-        super().__init__()
-        self.gamma = nn.Parameter(init_values * torch.ones(projection_dim))
-        self.channels_last = channels_last
-
-    def forward(self, x, mask=None):
-        if self.channels_last:
-            if mask is not None:
-                return x * self.gamma * mask.unsqueeze(-1)
-            else:
-                return x * self.gamma
-        else:
-            if mask is not None:
-                return x * self.gamma[:, None, None] * mask.unsqueeze(1)
-            else:
-                return x * self.gamma[:, None, None]
+from omnilearned.attention import Attention
+from omnilearned.neighbors import knn
 
 
 class DynamicTanh(nn.Module):
@@ -53,12 +38,16 @@ class NoScaleDropout(nn.Module):
         super().__init__()
         self.rate = rate
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, offsets=None) -> torch.Tensor:
         if not self.training or self.rate == 0:
             return x
         else:
-            mask_shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+            mask_shape = (x.shape[0] if offsets is None else len(offsets) - 1,) + (
+                1,
+            ) * (x.ndim - 1)
             mask = torch.empty(mask_shape, device=x.device).bernoulli_(1 - self.rate)
+            if offsets is not None:
+                mask = torch.repeat_interleave(mask, offsets[1:] - offsets[:-1], dim=0)
             return x * mask
 
 
@@ -104,7 +93,9 @@ def get_d3(xi, xj, mask, is_log=True):
 
 def get_dot(xi, xj, mask, is_log=True):
     dot = (xi[:, :, :, :3] * xj[:, :, :, :3]).sum(dim=-1)
-    dr2 = 1.0 - dot / (xi[:, :, :, :3].norm(-1) * xj[:, :, :, :3].norm(-1) + 1e-8)
+    dr2 = 1.0 - dot / (
+        xi[:, :, :, :3].norm(dim=-1) * xj[:, :, :, :3].norm(dim=-1) + 1e-8
+    )
 
     if is_log:
         return torch.log(torch.where(dr2 > 0, dr2, 1.0)).unsqueeze(-1) * mask
@@ -115,7 +106,8 @@ def get_dot(xi, xj, mask, is_log=True):
 def get_dot_diff(xi, xj, mask, is_log=True):
     dot = (xi[:, :, :, :3] * (xi[:, :, :, :3] - xj[:, :, :, :3])).sum(dim=-1)
     dr2 = 1.0 - dot / (
-        xi[:, :, :, :3].norm(-1) * (xi[:, :, :, :3] - xj[:, :, :, :3]).norm(-1) + 1e-8
+        xi[:, :, :, :3].norm(dim=-1) * (xi[:, :, :, :3] - xj[:, :, :, :3]).norm(dim=-1)
+        + 1e-8
     )
 
     if is_log:
@@ -134,57 +126,132 @@ def get_kt(xi, xj, mask, is_log=False):
         return kt
 
 
-def get_swd(x, mask, indices, n_iters=5, epsilon=1.0, is_log=True):
-    B, N, F = x.shape
+def _ot_block(left, right, la, lb, epsilon, n_iters, gram=None):
+    if gram is None:
+        cost = (1 - torch.einsum("bikf,bjlf->bijkl", left, right)).clamp_min(0)
+    else:
+        batch = torch.arange(gram.shape[0], device=gram.device)[
+            :, None, None, None, None
+        ]
+        cost = (
+            1 - gram[batch, left[:, :, None, :, None], right[:, None, :, None, :]]
+        ).clamp_min(0)
 
-    neighbors = x.view(B * N, -1)[indices, :]
-    neighbors = neighbors.view(B, N, -1, F)
+    kernel = -cost / epsilon
+    u = torch.zeros_like(kernel[..., :1])
+    v = torch.zeros_like(kernel[..., :1, :])
 
-    mask_neighbors = mask.view(B * N, -1)[indices, :]
-    mask_neighbors = mask_neighbors.view(B, N, -1, 1)
+    for _ in range(n_iters):
+        u = la[:, :, None, :, None] - torch.logsumexp(kernel + v, dim=-1, keepdim=True)
+        v = lb[:, None, :, None, :] - torch.logsumexp(kernel + u, dim=-2, keepdim=True)
 
-    knn_fts_center = x.unsqueeze(2).expand_as(neighbors)
-    k = neighbors.shape[2]
+    plan = (kernel + u + v).exp()
+    rows = plan.sum(dim=-1)
+    cols = plan.sum(dim=-2)
 
-    def _ot(x):
-        device, dtype = x.device, x.dtype
-
-        x_flat = x.reshape(B, N * k, -1)
-        x_flat = x_flat / (x_flat.norm(dim=-1, keepdim=True) + 1e-12)
-        gram = x_flat @ x_flat.transpose(-1, -2)
-        gram = gram.reshape(B, N, k, N, k).permute(0, 1, 3, 2, 4)
-        C = (1.0 - gram).clamp(min=0.0)
-        C = C / (C.amax(dim=(-1, -2, -3, -4), keepdim=True) + 1e-8)
-
-        logK = -C / epsilon
-        logK = logK - logK.amax(dim=-1, keepdim=True)
-
-        log_u = torch.zeros((B, N, N, k, 1), device=device, dtype=dtype)
-        log_v = torch.zeros((B, N, N, 1, k), device=device, dtype=dtype)
-
-        log_a = -torch.log(torch.tensor(k, device=device, dtype=dtype))
-
-        for _ in range(n_iters):
-            log_u = log_a - torch.logsumexp(logK + log_v, dim=-1, keepdim=True)
-            log_v = log_a - torch.logsumexp(logK + log_u, dim=-2, keepdim=True)
-
-        P = torch.exp(log_u + logK + log_v)
-        dist = (P * C).sum(dim=(-1, -2))
-        return dist.unsqueeze(-1)
-
-    # dist = _ot(neighbors*mask_neighbors)
-    dist = torch.cat(
-        [
-            _ot(neighbors * mask_neighbors),
-            _ot((knn_fts_center - neighbors) * mask_neighbors),
-            _ot(neighbors[:, :, :, :3] * mask_neighbors),
-        ],
-        -1,
+    return epsilon * (
+        (u.squeeze(-1) * rows).sum(-1) + (v.squeeze(-2) * cols).sum(-1) - rows.sum(-1)
     )
 
+
+def _debias(distance):
+    """Symmetric, self-debiased entropic OT; clip finite-iteration negatives."""
+    distance = 0.5 * (distance + distance.transpose(1, 2))
+    diagonal = distance.diagonal(dim1=1, dim2=2)
+    distance = distance - 0.5 * (diagonal[:, :, None] + diagonal[:, None, :])
+    return distance.clamp_min(0)
+
+
+def get_ot(
+    x,
+    mask,
+    indices,
+    n_iters=5,
+    epsilon=1.0,
+    is_log=True,
+    chunk_size=128,
+    cache_cosines=True,
+):
+    """Return cosine Sinkhorn divergences: full, relative, coordinates.
+
+    Shape is (B,N,N,3). All three
+    channels use the entropic objective <P,C> + epsilon*sum(P*(log(P)-1)),
+    symmetrize, and subtract the mean self-objective using existing diagonals.
+    With finite n_iters these are approximate divergences; negative estimates
+    are clamped to zero before the optional logarithm. No extra OT solves.
+
+    indices: flattened batch-offset kNN indices, as returned by this package.
+    x[..., :3]: Cartesian positions used by the coordinate-only third channel.
+    cache_cosines: reuse a B*N*N cosine matrix for the absolute channel.
+    All channels use uniform valid-neighbor weights, including unequal counts.
+    epsilon and n_iters apply to all three channels; no radial W1 is computed.
+    is_log applies the existing log(clamp_min(1e-12)) to all three channels.
+    Uses eager PyTorch only; no torch.compile or POT dependency.
+    """
+    b, n, features = x.shape
+    if chunk_size < 1 or epsilon <= 0 or n_iters < 0:
+        raise ValueError("Require chunk_size >= 1, epsilon > 0, n_iters >= 0")
+    if features < 3:
+        raise ValueError("The first three features must be Cartesian positions")
+    if n == 0:
+        return x.new_zeros((b, 0, 0, 3))
+    idx = indices.reshape(b, n, -1)
+    k = idx.shape[-1]
+    if k == 0:
+        raise ValueError("At least one neighbor slot is required")
+    mask = mask.reshape(b, n, 1).bool()
+    centers = torch.arange(b * n, device=x.device).reshape(b, n, 1)
+    valid = mask.reshape(-1)[idx] & (idx != centers) & mask
+    weights = valid.float()
+    live = valid.any(-1)
+    weights = weights / weights.sum(-1, keepdim=True).clamp_min(1)
+    weights = torch.where(live[..., None], weights, 1 / k)
+    log_weights = weights.clamp_min(1e-30).log()
+    local_idx = idx - torch.arange(b, device=x.device)[:, None, None] * n
+    needs_grad = torch.is_grad_enabled() and x.requires_grad
+    chunks = [slice(i, i + chunk_size) for i in range(0, n, chunk_size)]
+
+    def distance(values, gram=None):
+        rows = []
+        for i in chunks:
+            columns = []
+            for j in chunks:
+                args = (
+                    values[:, i],
+                    values[:, j],
+                    log_weights[:, i],
+                    log_weights[:, j],
+                    epsilon,
+                    n_iters,
+                    gram,
+                )
+                columns.append(_ot_block(*args))
+            rows.append(torch.cat(columns, dim=2))
+        return torch.cat(rows, dim=1)
+
+    neighbors = x.reshape(b * n, features)[idx]
+
+    def absolute(values, gathered):
+        if needs_grad:
+            # Preserve the original gradient accumulation at zero displacements.
+            return distance(F.normalize(gathered.float(), dim=-1, eps=1e-12))
+        # Normalize each particle once, before repeated neighborhood gathering.
+        values = F.normalize(values.float(), dim=-1, eps=1e-12)
+        if cache_cosines:
+            return distance(local_idx, values @ values.transpose(-1, -2))
+        return distance(values.reshape(b * n, -1)[idx])
+
+    full = _debias(absolute(x, neighbors))
+    # Subtract in the original dtype, matching the old implementation.
+    relative = _debias(
+        distance(F.normalize((x.unsqueeze(2) - neighbors).float(), dim=-1, eps=1e-12))
+    )
+    geometric = _debias(absolute(x[..., :3], neighbors[..., :3]))
+
+    result = torch.stack((full, relative, geometric), dim=-1)
     if is_log:
-        return torch.log(dist.clamp(min=1e-12))
-    return dist
+        result = result.clamp_min(1e-12).log()
+    return result.to(x.dtype) * (live[:, :, None] & live[:, None, :]).unsqueeze(-1)
 
 
 class InputBlock(nn.Module):
@@ -262,7 +329,7 @@ class InteractionBlock(nn.Module):
                 -1,
             )
         elif self.int_type == "ot":
-            x_int = get_swd(x, mask, indices) * mask_event
+            x_int = get_ot(x, mask, indices) * mask_event
 
         out = self.mlp(x_int)
         # mask again
@@ -321,15 +388,11 @@ class LocalEmbeddingBlock(nn.Module):
                     mlp_drop=mlp_drop,
                     act_layer=act_layer,
                     norm_layer=norm_layer,
-                    num_tokens=0,
                     skip=False,
                     use_int=False,
                 )
                 for _ in range(num_transformers)
             ]
-        )
-        self.feature_drop = (
-            NoScaleDropout(feature_drop) if feature_drop > 0.0 else nn.Identity()
         )
 
     def pairwise_distance(self, points):
@@ -341,24 +404,16 @@ class LocalEmbeddingBlock(nn.Module):
     def forward(self, points, features, mask, indices=None):
         batch_size, num_points, num_dims = features.shape
         if indices is None:
-            distances = self.pairwise_distance(
-                points
-            )  # uses custom pairwise function, not torch.cdist
-            _, indices = torch.topk(-distances, k=self.K + 1, dim=-1)
-            indices = indices[:, :, 1:]  # Exclude self
-
-            idx_base = (
-                torch.arange(0, batch_size, device=features.device).view(-1, 1, 1)
-                * num_points
-            )
-            indices = indices + idx_base
-            indices = indices.view(-1)
+            indices, neighbor_valid = knn(points, mask, self.K)
+        else:
+            neighbor_valid = mask.reshape(batch_size * num_points, 1)[indices].reshape(
+                batch_size, num_points, self.K, 1
+            ) & mask.unsqueeze(2)
 
         neighbors = features.view(batch_size * num_points, -1)[indices, :]
         neighbors = neighbors.view(batch_size, num_points, self.K, num_dims)
 
-        mask_neighbors = mask.view(batch_size * num_points, -1)[indices, :]
-        mask_neighbors = mask_neighbors.view(batch_size, num_points, self.K, 1)
+        mask_neighbors = neighbor_valid
 
         knn_fts_center = features.unsqueeze(2).expand_as(neighbors)
         local_features = knn_fts_center - neighbors
@@ -388,7 +443,6 @@ class LocalEmbeddingBlock(nn.Module):
                     -1,
                 )
 
-            x_int = self.feature_drop(x_int)
             local_features = (
                 torch.cat(
                     [local_features, x_int],
@@ -400,14 +454,13 @@ class LocalEmbeddingBlock(nn.Module):
         mask_neighbors = mask_neighbors.view(batch_size * num_points, self.K, 1)
         local_features = local_features.view(batch_size * num_points, self.K, -1)
 
-        attn_mask = mask_neighbors.float() @ mask_neighbors.float().transpose(-1, -2)
-        attn_mask = ~(attn_mask.bool()).repeat_interleave(self.num_heads, dim=0)
-        attn_mask = attn_mask.float() * -1e9
-
-        x = self.mlp(local_features) * mask_neighbors
-
-        for ib, blk in enumerate(self.in_blocks):
-            x = blk(x, mask=mask_neighbors, attn_mask=attn_mask)
+        centers = mask.reshape(-1).bool()
+        local_mask = mask_neighbors[centers]
+        x_real = self.mlp(local_features[centers]) * local_mask
+        for blk in self.in_blocks:
+            x_real = blk(x_real, mask=local_mask)
+        x = x_real.new_zeros((batch_size * num_points, self.K, x_real.shape[-1]))
+        x[centers] = x_real
         x = x.view((batch_size, num_points, self.K, -1))
         mask_neighbors = mask_neighbors.view((batch_size, num_points, self.K, -1))
         x = torch.sum(x, dim=2) / torch.sum(1e-9 + mask_neighbors, dim=2) * mask
@@ -462,19 +515,17 @@ class AttBlock(nn.Module):
         mlp_drop=0.0,
         act_layer=nn.GELU,
         norm_layer=nn.LayerNorm,
-        num_tokens=1,
         use_int=False,
         skip=False,
         use_attn=True,
     ):
         super().__init__()
-        self.norm1 = norm_layer(dim)
+        self.norm1 = norm_layer(dim) if use_attn else nn.Identity()
         self.norm2 = norm_layer(dim)
-        self.num_tokens = num_tokens
         self.use_attn = use_attn
 
         if self.use_attn:
-            self.attn = nn.MultiheadAttention(
+            self.attn = Attention(
                 embed_dim=dim,
                 num_heads=num_heads,
                 bias=False,
@@ -498,7 +549,7 @@ class AttBlock(nn.Module):
         self.skip_linear = nn.Linear(2 * dim, dim) if skip else None
         self.num_heads = num_heads
 
-    def forward(self, x, mask=None, attn_mask=None, skip=None):
+    def forward(self, x, mask=None, attn_mask=None, skip=None, offsets=None):
         if self.skip_linear is not None and skip is not None:
             x = self.skip_linear(torch.cat([x, skip], dim=-1)) * mask
 
@@ -509,14 +560,23 @@ class AttBlock(nn.Module):
                     query=x_norm,
                     key=x_norm,
                     value=x_norm,
-                    key_padding_mask=~mask[:, :, 0] if attn_mask is None else None,
+                    key_padding_mask=(
+                        ~mask[:, :, 0]
+                        if offsets is None and attn_mask is None
+                        else None
+                    ),
+                    offsets=offsets,
                     attn_mask=attn_mask,
                     need_weights=False,
                 )[0]
                 * mask
             )
 
-            x = x + self.attn_drop(x_attn)
+            x = x + (
+                self.attn_drop(x_attn, offsets=offsets)
+                if isinstance(self.attn_drop, NoScaleDropout)
+                else self.attn_drop(x_attn)
+            )
 
         x = x + self.mlp(self.norm2(x), mask)
         return x
@@ -543,7 +603,7 @@ class TokenAttBlock(nn.Module):
         self.use_attn = use_attn
 
         if self.use_attn:
-            self.attn = nn.MultiheadAttention(
+            self.attn = Attention(
                 embed_dim=dim,
                 num_heads=num_heads,
                 bias=False,
@@ -583,82 +643,10 @@ class TokenAttBlock(nn.Module):
 
             tokens = tokens + self.attn_drop(token_attn)
 
+        if not self.use_attn:
+            weights = torch.ones_like(x[..., :1]) if mask is None else mask
+            tokens = tokens + (x * weights).sum(1, keepdim=True) / weights.sum(
+                1, keepdim=True
+            ).clamp_min(1)
         tokens = tokens + self.mlp(self.norm(tokens))
         return torch.cat([tokens, x], 1)
-
-
-class TokenAttBlockFeatDrop(TokenAttBlock):
-    def __init__(
-        self,
-        dim,
-        num_heads,
-        mlp_ratio=4.0,
-        attn_drop=0.0,
-        mlp_drop=0.0,
-        act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm,
-        num_tokens=1,
-        skip=False,
-        feature_drop=0.0,
-    ):
-        super().__init__(
-            dim=dim,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            attn_drop=attn_drop,
-            mlp_drop=mlp_drop,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
-            num_tokens=num_tokens,
-            skip=skip,
-        )
-
-        self.dropout = (
-            NoScaleDropout(feature_drop) if feature_drop > 0.0 else nn.Identity()
-        )
-
-    def forward(self, x, mask=None, skip=None):
-        x = super().forward(x, mask=mask, skip=skip)
-        return self.dropout(x)
-
-
-class AttBlockFeatDrop(AttBlock):
-    def __init__(
-        self,
-        dim,
-        num_heads,
-        mlp_ratio=4.0,
-        attn_drop=0.0,
-        mlp_drop=0.0,
-        act_layer=nn.GELU,
-        norm_layer=nn.LayerNorm,
-        num_tokens=1,
-        use_int=False,
-        skip=False,
-        feature_drop=0.0,
-    ):
-        super().__init__(
-            dim=dim,
-            num_heads=num_heads,
-            mlp_ratio=mlp_ratio,
-            attn_drop=attn_drop,
-            mlp_drop=mlp_drop,
-            act_layer=act_layer,
-            norm_layer=norm_layer,
-            num_tokens=num_tokens,
-            use_int=use_int,
-            skip=skip,
-        )
-
-        self.dropout = (
-            NoScaleDropout(feature_drop) if feature_drop > 0.0 else nn.Identity()
-        )
-
-    def forward(self, x, mask=None, attn_mask=None, skip=None):
-        x = super().forward(
-            x,
-            mask=mask,
-            attn_mask=attn_mask,
-            skip=skip,
-        )
-        return self.dropout(x)

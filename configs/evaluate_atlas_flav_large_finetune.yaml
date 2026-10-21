@@ -1,0 +1,20 @@
+# From shell/: ./evaluate.sh evaluate_atlas_flav_large_finetune.yaml
+# Checkpoint: best_model_atlas_flav_large_finetune.pt
+path: /pscratch/sd/v/vmikuni/datasets
+size: large
+num_workers: 4
+persistent_workers: false
+check_remote: false
+dataset: atlas_flav
+mode: classifier
+num_classes: 4
+num_gen_classes: 8
+interaction: true
+conditional: true
+num_cond: 4
+use_add: true
+num_add: 17
+batch: 128
+save_tag: atlas_flav_large_finetune
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

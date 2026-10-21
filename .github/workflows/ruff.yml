@@ -1,11 +1,9 @@
 name: ruff
-
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
-    branches: ["main"]
-
+    branches: [main]
 jobs:
   ruff:
     runs-on: ubuntu-latest
@@ -13,4 +11,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
         with:
-          args: "format --check --diff"
+          args: 'check .'
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: 'format --check .'

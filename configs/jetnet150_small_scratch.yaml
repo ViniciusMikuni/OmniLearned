@@ -1,0 +1,21 @@
+# From shell/: ./run.sh jetnet150_small_scratch.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: false
+fine_tune: false
+size: small
+num_workers: 4
+persistent_workers: false
+check_remote: false
+ema: true
+dataset: jetnet150
+mode: generator
+num_classes: 5
+conditional: true
+batch: 64
+epoch: 200
+lr: 5.0e-05
+save_tag: jetnet150_small_scratch
+freeze: false
+lr_factor: 1.0
+wandb: false

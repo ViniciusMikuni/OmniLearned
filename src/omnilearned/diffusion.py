@@ -1,7 +1,12 @@
-import torch
-import torch.nn as nn
+import math
+
 import numpy as np
+import torch
+from torch import nn
 from torchdiffeq import odeint
+
+from omnilearned.data_spec import multiplicity_counts, noise_parameters
+from omnilearned.packing import padded
 
 
 class MPFourier(nn.Module):
@@ -19,12 +24,8 @@ class MPFourier(nn.Module):
 
 
 def get_eps(x, mask, dataset):
-    if dataset == "jetnet":
-        return get_jetnet_eps(x, mask)
-    elif dataset == "lhco":
-        return get_ad_eps(x, mask)
-    else:
-        return torch.randn_like(x) * mask
+    mean, std = noise_parameters(x, dataset)
+    return (torch.randn_like(x) * std + mean) * mask
 
 
 def get_logsnr_alpha_sigma(time, shift=1.0):
@@ -34,40 +35,6 @@ def get_logsnr_alpha_sigma(time, shift=1.0):
     return logsnr, alpha, sigma
 
 
-def get_ad_eps(x, mask):
-    means = torch.tensor([0.0, 0.0, 1.11398, 1.43384], device=x.device)
-    stds = torch.tensor(
-        [0.270949, 0.27426, 1.30273, 1.33559],
-        device=x.device,
-    )
-
-    if x.shape[-1] == 4:
-        means = means.view(1, 1, 4)
-        stds = stds.view(1, 1, 4)
-        eps = torch.randn_like(x) * stds + means
-    else:
-        eps = torch.randn_like(x)
-
-    return eps * mask
-
-
-def get_jetnet_eps(x, mask):
-    means = torch.tensor([0.0, 0.0, 2.92904309e00, 3.14843288e00], device=x.device)
-    stds = torch.tensor(
-        [0.11580968, 0.11667726, 0.95442127, 0.98245158],
-        device=x.device,
-    )
-
-    if x.shape[-1] == 4:
-        means = means.view(1, 1, 4)
-        stds = stds.view(1, 1, 4)
-        eps = torch.randn_like(x) * stds + means
-    else:
-        eps = torch.randn_like(x)
-
-    return eps * mask
-
-
 def get_ad_eps_hl(x):
     means = torch.tensor([6.40028, 5.0057, 0.4544, 0.6861], device=x.device)
     stds = torch.tensor(
@@ -75,6 +42,8 @@ def get_ad_eps_hl(x):
         device=x.device,
     )
 
+    if x.shape[-1] != 4:
+        return torch.randn_like(x)
     means = means.view(1, -1)
     stds = stds.view(1, -1)
     eps = torch.randn_like(x) * stds + means
@@ -82,8 +51,8 @@ def get_ad_eps_hl(x):
     return eps
 
 
-def perturb(x, time, dataset):
-    mask = x[:, :, 2:3] != 0
+def perturb(x, time, dataset, mask=None):
+    mask = x[:, :, 2:3] != 0 if mask is None else mask
     eps = get_eps(x, mask, dataset)
     logsnr, alpha, sigma = get_logsnr_alpha_sigma(time)
     z = alpha * x + sigma * eps
@@ -99,13 +68,15 @@ def perturb_hl(x, time):
     return z, eps - x, torch.ones_like(x)
 
 
-def network_wrapper(model, z, condition, pid, add_info, y, time):
-    base_model = model.module if hasattr(model, "module") else model
-    x = base_model.body(z, condition, pid, add_info, time)
-    x = base_model.generator(x, y)
-    return x
+def network_wrapper(model, z, condition, pid, add_info, y, time, mask=None):
+    base = model.module if hasattr(model, "module") else model
+    x, body_mask = base.body(
+        z, condition, pid, add_info, time, mask=mask, return_mask=True
+    )
+    return base.generator(x, y, mask=body_mask)
 
 
+@torch.no_grad()
 def generate(
     model,
     y,
@@ -113,180 +84,66 @@ def generate(
     cond=None,
     pid=None,
     add_info=None,
-    nsteps=128,
+    nsteps=256,
     multiplicity=None,
     dataset="top",
     device="cuda",
-) -> torch.Tensor:
-    x = torch.randn(*shape).to(device)  # x_T ~ N(0, 1)
-    nsample = x.shape[0]
-    # Let's create the mask for the zero-padded particles
-    nparts = (100 * multiplicity).int().view((-1, 1)).to(device)
-
-    max_part = x.shape[1]
-    mask = torch.tile(
-        torch.arange(max_part).to(device), (nparts.shape[0], 1)
-    ) < torch.tile(nparts, (1, max_part))
-
-    x_0 = get_eps(x, mask.float().unsqueeze(-1), dataset)
-
-    def ode_wrapper(t, x_t):
-        time = t * torch.ones((nsample,)).to(device)
-        x_t = x_t * mask.float().unsqueeze(-1)
-        v = network_wrapper(model, x_t, cond, pid, add_info, y, time)
-        return v
-
-    x_t = odeint(
-        func=ode_wrapper,
-        y0=x_0,
-        t=torch.tensor(np.linspace(1, 0, nsteps)).to(device, dtype=x_0.dtype),
-        method="midpoint",
+):
+    if nsteps < 2:
+        raise ValueError("nsteps must be at least 2")
+    b, maximum, features = shape
+    counts = (
+        torch.full((b,), maximum, device=device, dtype=torch.long)
+        if multiplicity is None
+        else multiplicity_counts(multiplicity.to(device), maximum)
     )
-    return x_t[-1]
+    offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+    state = torch.empty((int(offsets[-1]), features), device=device)
+    mean, std = noise_parameters(state, dataset)
+    state = torch.randn_like(state) * std + mean
+    width = max(1, int(counts.max()))
+
+    def rhs(t, packed):
+        dense, mask = padded(packed, offsets, width)
+        v = network_wrapper(
+            model,
+            dense,
+            cond,
+            pid[:, :width] if pid is not None else None,
+            add_info[:, :width] if add_info is not None else None,
+            y,
+            t.expand(b),
+            mask=mask,
+        )
+        return v[mask.squeeze(-1)]
+
+    if state.numel():
+        state = odeint(
+            rhs,
+            state,
+            state.new_tensor([1.0, 0.0]),
+            method="midpoint",
+            options={"step_size": 1.0 / (nsteps - 1)},
+        )[-1]
+    return padded(state, offsets, maximum)[0]
 
 
-def generate_hl(model, shape, cond=None, nsteps=512, device="cuda") -> torch.Tensor:
-    x = torch.randn(*shape).to(device)  # x_T ~ N(0, 1)
-    nsample = x.shape[0]
+@torch.no_grad()
+def generate_hl(model, shape, cond=None, nsteps=512, device="cuda"):
+    if nsteps < 2:
+        raise ValueError("nsteps must be at least 2")
+    state = get_ad_eps_hl(torch.empty(shape, device=device))
 
-    x_0 = get_ad_eps_hl(x)
+    def rhs(t, x):
+        return model(x, t.expand(shape[0]), cond)
 
-    def ode_wrapper(t, x_t):
-        time = t * torch.ones((nsample,)).to(device)
-        v = model(x_t, time, cond)
-        return v
-
-    x_t = odeint(
-        func=ode_wrapper,
-        y0=x_0,
-        t=torch.tensor(np.linspace(1, 0, nsteps)).to(device, dtype=x_0.dtype),
+    return odeint(
+        rhs,
+        state,
+        state.new_tensor([1.0, 0.0]),
         method="midpoint",
-    )
-    return x_t[-1]
-
-
-# def estimate_max_logp(
-#     model, x, y, num_param=2, cond=None, pid=None, add_info=None,
-#     multiplicity=None, nsteps=32, seed=None, device="cuda",
-#     scan_ranges=None, scan_points=21, n_time_bins=20, time_chunk=None,
-#     # ---- new, defaulted to preserve original behavior ----
-#     n_noise=1, coord_passes=1, parts_per_unit=100,
-# ):
-#     """
-#     Scan `num_param` conditioning params independently and pick the values that
-#     minimize the flow-matching loss (returned as a negated 'score').
-
-#     NOTE: 'max_logp' is the NEGATIVE avg FM loss, not a real log-likelihood;
-#     the key name is kept only for backward compatibility.
-
-#     Defaults (n_noise=1, coord_passes=1, parts_per_unit=100) reproduce the
-#     original behavior. n_noise>1 averages over several shared eps draws to cut
-#     variance; coord_passes>1 enables coordinate descent for correlated params.
-#     """
-#     assert cond is not None, "cond must contain the params to scan."
-#     assert scan_ranges is not None, "scan_ranges required: list of (min,max)."
-#     assert multiplicity is not None, "multiplicity required (builds the mask)."
-
-#     return _run(
-#         model, x, y, num_param, cond, pid, add_info, multiplicity, seed,
-#         device, scan_ranges, scan_points, n_time_bins, time_chunk,
-#         n_noise, coord_passes, parts_per_unit,
-#     )
-
-
-# @torch.no_grad()
-# def _run(model, x, y, num_param, cond, pid, add_info, multiplicity, seed,
-#          device, scan_ranges, scan_points, n_time_bins, time_chunk,
-#          n_noise, coord_passes, parts_per_unit):
-
-#     x = x.to(device)
-#     nsample, max_part, nfeat = x.shape
-
-#     # mask (same as generate())
-#     nparts = (parts_per_unit * multiplicity).int().view(-1, 1).to(device)
-#     ar = torch.arange(max_part, device=device)
-#     mask_f = (ar.unsqueeze(0) < nparts).float().unsqueeze(-1)   # [N,P,1]
-#     x = x * mask_f
-#     n_real = torch.clamp(mask_f.sum() * nfeat, min=1.0)
-
-#     # eps: [K,N,P,F], drawn once, shared across all t and thetas
-#     if seed is not None:
-#         with torch.random.fork_rng(devices=[device] if str(device) != "cpu" else []):
-#             torch.manual_seed(seed)
-#             if str(device) != "cpu":
-#                 torch.cuda.manual_seed_all(seed)
-#             eps = torch.stack([get_jetnet_eps(x, mask_f) for _ in range(n_noise)])
-#     else:
-#         eps = torch.stack([get_jetnet_eps(x, mask_f) for _ in range(n_noise)])
-#     K = eps.shape[0]
-#     target = (eps - x) * mask_f                                 # [K,N,P,F]
-
-#     # split cond: [...fixed..., theta(num_param), mult(1)]
-#     cond = cond.to(device)
-#     assert cond.shape[-1] >= num_param + 1, "cond last dim too small."
-#     mult_col   = cond[..., -1:].detach()
-#     theta0     = cond[..., -(num_param + 1):-1].detach()
-#     cond_fixed = cond[..., :-(num_param + 1)].detach()
-
-#     def assemble(theta):
-#         parts = ([cond_fixed] if cond_fixed.shape[-1] else []) + [theta, mult_col]
-#         return torch.cat(parts, dim=-1)
-
-#     t_grid = (torch.arange(n_time_bins, device=device, dtype=x.dtype) + 0.5) / n_time_bins
-#     tc = time_chunk or n_time_bins
-
-#     def expand(t, reps):
-#         if not torch.is_tensor(t):
-#             return t
-#         return t.repeat_interleave(reps, dim=0) if False else \
-#                t.unsqueeze(0).expand(reps, *t.shape).reshape(reps * t.shape[0], *t.shape[1:])
-
-#     def score(theta):
-#         cond_full = assemble(theta)                            # [N,C]
-#         loss = torch.zeros((), device=device, dtype=x.dtype)
-#         for s in range(0, n_time_bins, tc):
-#             tb = t_grid[s:s + tc]
-#             Tb = tb.shape[0]
-#             reps = Tb * K
-#             # z = (1-t)x + t*eps over (Tb,K,N)
-#             tcol = tb.view(Tb, 1, 1, 1, 1)
-#             z = ((1 - tcol) * x + tcol * eps.unsqueeze(0)) * mask_f      # [Tb,K,N,P,F]
-#             z = z.reshape(reps * nsample, max_part, nfeat)
-
-#             time  = tb.view(Tb, 1, 1).expand(Tb, K, nsample).reshape(-1)
-#             condb = cond_full.expand(Tb, K, nsample, -1).reshape(reps * nsample, -1)
-#             maskb = mask_f.expand(Tb, K, nsample, max_part, 1).reshape(reps * nsample, max_part, 1)
-#             tgtb  = target.expand(Tb, K, nsample, max_part, nfeat).reshape(reps * nsample, max_part, nfeat)
-
-#             v = network_wrapper(model, z, condb,
-#                                 expand(pid, reps), expand(add_info, reps),
-#                                 expand(y, reps), time).float()
-#             loss = loss + (((v - tgtb) ** 2) * maskb).sum()
-#         return -(loss / (n_time_bins * K * n_real))
-
-#     if isinstance(scan_points, int):
-#         scan_points = [scan_points] * num_param
-#     axes = [torch.linspace(lo, hi, n, device=device)
-#             for (lo, hi), n in zip(scan_ranges, scan_points)]
-
-#     best = theta0.clone()
-#     profiles = [None] * num_param
-#     for _ in range(coord_passes):
-#         for d in range(num_param):
-#             prof = torch.empty(len(axes[d]), device=device)
-#             for i, val in enumerate(axes[d]):
-#                 th = best.clone()
-#                 th[..., d] = val
-#                 prof[i] = score(th)
-#             profiles[d] = prof
-#             best[..., d] = axes[d][prof.argmax()]
-
-#     return {
-#         "theta": best,
-#         "max_logp": score(best).item(),
-#         "profiles": [p.cpu() for p in profiles],
-#         "axes": [a.cpu() for a in axes],
-#     }
+        options={"step_size": 1.0 / (nsteps - 1)},
+    )[-1]
 
 
 def estimate_max_logp(
@@ -301,165 +158,139 @@ def estimate_max_logp(
     nsteps=32,
     seed=None,
     device="cuda",
-    scan_ranges=None,  # list of (min, max), one per scanned parameter
-    scan_points=21,  # int (same for all) or list[int] per parameter
+    scan_ranges=None,
+    scan_points=7,
+    coarse_steps=8,
+    refinements=2,
+    probes=1,
+    candidate_batch=4,
+    dataset="top",
 ):
+    """Independent scans with fixed other parameters and batched refinement.
+
+    Uses your existing network_wrapper; tensor auxiliary inputs must be
+    event-batched (leading dimension N). Assumes data at t=0, noise at t=1.
+    scan_points: points per scan; refinements: additional narrowed scans.
+    probes: fixed Hutchinson probes during refinement (coarse scan uses one).
+    axes/profiles contain the final local scan, not the full original range.
+    max_logp is evaluated at the combined estimates, as in the original.
     """
-    Estimate the maximum log-likelihood of an observed point cloud `x` by
-    scanning `num_param` conditioning parameters INDEPENDENTLY.
+    if cond is None or multiplicity is None or scan_ranges is None:
+        raise ValueError("cond, multiplicity and scan_ranges are required")
+    counts = [scan_points] * num_param if isinstance(scan_points, int) else scan_points
+    if len(counts) != num_param or len(scan_ranges) != num_param:
+        raise ValueError("Provide one range and point count per parameter")
+    if (
+        min(counts) < 3
+        or min(nsteps, coarse_steps, probes, candidate_batch) < 1
+        or refinements < 1
+        or any(lo >= hi for lo, hi in scan_ranges)
+    ):
+        raise ValueError("Invalid scan settings")
 
-    For each scanned parameter, a 1D grid of `scan_points` values is evaluated
-    while the other scanned parameters are held at their default (theta0).
-    This costs sum(scan_points) evaluations instead of a full product grid.
-
-    Layout of `cond` (last dim):
-        [ ...fixed columns... , theta (num_param) , multiplicity (1) ]
-    The multiplicity column is always last and is NOT scanned.
-
-    The base distribution matches get_jetnet_eps: a per-feature diagonal
-    Gaussian with the given means/stds when nfeat == 4, otherwise a standard
-    normal. The -log(std) Jacobian term is included for correct normalization.
-
-    Only likelihood VALUES are needed, so everything runs under no_grad with
-    the fast attention kernel (no double-backward).
-
-    Returns a dict with the best-fit parameters, the max log-likelihood,
-    per-parameter 1D log-likelihood profiles, and the grid axes.
-    """
     model.eval()
-    for p in model.parameters():
-        p.requires_grad_(False)
+    x = x.detach().to(device)
+    n, m, f = x.shape
+    cond = cond.detach().to(device)
+    if cond.ndim != 2 or cond.shape[0] != n or cond.shape[1] < num_param + 1:
+        raise ValueError("cond must have shape (N, fixed + num_param + 1)")
+    theta0 = cond[:, -num_param - 1 : -1].clone()
+    nparts = multiplicity_counts(multiplicity.to(device), m).reshape(n, 1)
+    mask = (torch.arange(m, device=device)[None] < nparts).to(x.dtype)[..., None]
+    x = x * mask
+    mean, std = noise_parameters(x, dataset)
+    gen = None if seed is None else torch.Generator(device=device).manual_seed(seed)
+    eps = (
+        2 * torch.randint(2, (probes, n, m, f), device=device, generator=gen) - 1
+    ).to(x.dtype) * mask
+    times = x.new_tensor([0.0, 1.0])
 
-    x = x.to(device)
-    nsample = x.shape[0]
-    max_part = x.shape[1]
-    nfeat = x.shape[-1]
+    def repeat(a, k):
+        return None if a is None else a.to(device).repeat((k,) + (1,) * (a.ndim - 1))
 
-    # ---- rebuild the mask exactly as in generate() ------------------------
-    nparts = (100 * multiplicity).int().view((-1, 1)).to(device)
-    mask = torch.tile(
-        torch.arange(max_part, device=device), (nparts.shape[0], 1)
-    ) < torch.tile(nparts, (1, max_part))
-    mask_f = mask.float().unsqueeze(-1)
-    x = x * mask_f
+    @torch.no_grad()
+    def logp(theta, steps, q):
+        values = []
+        for th in theta.split(candidate_batch):  # (candidates, events, parameters)
+            k = len(th)
+            c = repeat(cond, k)
+            c[:, -num_param - 1 : -1] = th.reshape(k * n, num_param)
+            xx, mm = repeat(x, k), repeat(mask, k)
+            yy, pp, aa = (repeat(a, k) for a in (y, pid, add_info))
+            ee = eps[:q].repeat(1, k, 1, 1)
 
-    # ---- base distribution parameters (must match get_eps) ---------
-    if nfeat == 4:
-        base_means = torch.tensor(
-            [0.0, 0.0, 2.92904309e00, 3.14843288e00], device=device
-        ).view(1, 1, 4)
-        base_stds = torch.tensor(
-            [0.11580968, 0.11667726, 0.95442127, 0.98245158], device=device
-        ).view(1, 1, 4)
-    else:
-        base_means = torch.zeros(1, 1, nfeat, device=device)
-        base_stds = torch.ones(1, 1, nfeat, device=device)
+            def rhs(t, state, mm=mm, c=c, pp=pp, aa=aa, yy=yy, k=k, ee=ee):
+                with torch.enable_grad():
+                    z = state[0].detach().requires_grad_(True)
+                    v = (
+                        network_wrapper(
+                            model,
+                            z * mm,
+                            c,
+                            pp,
+                            aa,
+                            yy,
+                            t.expand(k * n),
+                            mask=mm.bool(),
+                        )
+                        * mm
+                    )
+                    div = z.new_zeros(k * n)
+                    for j, e in enumerate(ee):
+                        g = torch.autograd.grad(
+                            (v * e).sum(), z, retain_graph=j < q - 1
+                        )[0]
+                        div = div + (g * e).sum((1, 2)) / q
+                return v.detach(), div.detach()
 
-    # ---- freeze the Hutchinson probe (Rademacher) -------------------------
-    if seed is not None:
-        gen = torch.Generator(device=device).manual_seed(seed)
-        eps = torch.randint(0, 2, x.shape, generator=gen, device=device).float()
-    else:
-        eps = torch.randint(0, 2, x.shape, device=device).float()
-    eps = (eps * 2.0 - 1.0) * mask_f
+            z, delta = odeint(
+                rhs,
+                (xx, xx.new_zeros(k * n)),
+                times,
+                method="rk4",
+                options={"step_size": 1.0 / steps},
+            )
+            base = (
+                -0.5 * ((z[-1] - mean) / std).square()
+                - std.log()
+                - 0.5 * math.log(2 * math.pi)
+            )
+            values.append(((base * mm).sum((1, 2)) + delta[-1]).reshape(k, n).sum(1))
+        return torch.cat(values)
 
-    # ---- split cond: [ ...fixed... , theta (num_param) , multiplicity ] ---
-    if cond is None:
-        raise ValueError("cond must contain the parameters to be scanned.")
-    cond = cond.to(device)
-    if cond.shape[-1] < num_param + 1:
-        raise ValueError(f"cond last dim ({cond.shape[-1]}) must be >= num_param + 1.")
-
-    mult_col = cond[..., -1:].detach()
-    theta0 = cond[..., -(num_param + 1) : -1].detach()  # default theta values
-    cond_fixed = cond[..., : -(num_param + 1)].detach()
-
-    def assemble_cond(theta):
-        parts = []
-        if cond_fixed.shape[-1] > 0:
-            parts.append(cond_fixed)
-        parts.append(theta)
-        parts.append(mult_col)
-        return torch.cat(parts, dim=-1)
-
-    # ---- likelihood evaluation (value only) -------------------------------
-    t_span = torch.tensor([0.0, 1.0], device=device, dtype=x.dtype)
-    step_size = 1.0 / nsteps
-    xnum = x.numel()
-
-    def logp_value(theta):
-        """Return summed log p(x | theta) over the batch."""
-        cond_full = assemble_cond(theta)
-
-        def velocity(t, x_t):
-            time = t * torch.ones((nsample,), device=device)
-            x_t = x_t * mask_f
-            return network_wrapper(model, x_t, cond_full, pid, add_info, y, time)
-
-        def augmented(t, state):
-            x_t = state[:xnum].view_as(x)
-            with torch.enable_grad():
-                x_in = x_t.requires_grad_(True)
-                v = velocity(t, x_in)
-                (grad,) = torch.autograd.grad((v * eps).sum(), x_in, create_graph=False)
-            div = ((grad * eps) * mask_f).sum(dim=tuple(range(1, x_t.dim())))
-            return torch.cat([v.reshape(-1), div.reshape(-1)])
-
-        state0 = torch.cat([x.reshape(-1), torch.zeros(nsample, device=device)])
-        sol = odeint(
-            augmented,
-            state0,
-            t_span,
-            method="rk4",
-            options={"step_size": step_size},
-        )
-        final = sol[-1]
-        x_1 = final[:xnum].view_as(x)
-        delta_logp = final[xnum:]
-
-        # diagonal-Gaussian base log density, summed over real points only
-        log_pz = (
-            -0.5 * ((x_1 - base_means) / base_stds) ** 2
-            - torch.log(base_stds)
-            - 0.5 * np.log(2.0 * np.pi)
-        )
-        log_pz = (log_pz * mask_f).sum(dim=tuple(range(1, x_1.dim())))
-
-        return (log_pz + delta_logp).sum()
-
-    # ---- build per-parameter 1D grids -------------------------------------
-    if scan_ranges is None:
-        raise ValueError("scan_ranges must be provided: list of (min, max) per param.")
-    if isinstance(scan_points, int):
-        scan_points = [scan_points] * num_param
-
-    axes = [
-        torch.linspace(lo, hi, n, device=device)
-        for (lo, hi), n in zip(scan_ranges, scan_points)
-    ]
-
-    # ---- scan each parameter independently --------------------------------
-    profiles = []  # 1D logp profile per parameter
-    best_theta = theta0.clone()
-
-    with torch.no_grad():
-        for d in range(num_param):
-            grid_d = axes[d]
-            prof = torch.empty(grid_d.shape[0], device=device)
-            for i, val in enumerate(grid_d):
-                theta_i = theta0.clone()
-                theta_i[..., d] = val  # vary only parameter d
-                prof[i] = logp_value(theta_i)
-            profiles.append(prof)
-            best_theta[..., d] = grid_d[torch.argmax(prof)]
-
-    # ---- final likelihood at the combined best-fit ------------------------
-    with torch.no_grad():
-        max_logp = logp_value(best_theta).item()
+    best, axes, profiles = theta0.clone(), [], []
+    for d, ((lo, hi), count) in enumerate(zip(scan_ranges, counts, strict=False)):
+        grid = torch.linspace(lo, hi, count, device=device, dtype=cond.dtype)
+        for level in range(refinements + 1):
+            theta = theta0.expand(len(grid), -1, -1).clone()
+            theta[:, :, d] = grid[:, None]
+            prof = logp(
+                theta,
+                coarse_steps if level == 0 else nsteps,
+                1 if level == 0 else probes,
+            )
+            if not torch.isfinite(prof).all():
+                raise RuntimeError(
+                    "Non-finite likelihood; check the model and integration"
+                )
+            peak = prof.argmax().item()
+            if level < refinements:
+                # Include the current maximum exactly, even at a boundary.
+                fine = torch.linspace(
+                    grid[max(0, peak - 1)].item(),
+                    grid[min(len(grid) - 1, peak + 1)].item(),
+                    count,
+                    device=device,
+                    dtype=grid.dtype,
+                )
+                grid = torch.cat((fine, grid[peak : peak + 1])).unique(sorted=True)
+        best[:, d] = grid[peak]
+        axes.append(grid.cpu())
+        profiles.append(prof.cpu())
 
     return {
-        "theta": best_theta,  # best-fit scanned params
-        "max_logp": max_logp,  # LL at combined best-fit
-        "profiles": [p.cpu() for p in profiles],  # 1D LL profile per param
-        "axes": [a.cpu() for a in axes],  # grid axis per param
+        "theta": best,
+        "max_logp": logp(best[None], nsteps, probes).item(),
+        "profiles": profiles,
+        "axes": axes,
     }

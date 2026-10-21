@@ -1,0 +1,16 @@
+# From shell/: ./evaluate.sh evaluate_top_small_decoder.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+size: small
+persistent_workers: false
+check_remote: false
+dataset: top
+num_tokens: 10
+num_part: 150
+mode: encoder
+num_classes: 2
+interaction: true
+local_interaction: true
+batch: 128
+save_tag: pretrain_decoder_small
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/datasets/top_decoder/val

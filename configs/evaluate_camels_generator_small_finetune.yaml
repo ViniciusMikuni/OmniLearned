@@ -1,0 +1,17 @@
+# From shell/: ./evaluate.sh evaluate_camels_small_scratch.yaml
+# Checkpoint: best_model_camels_small_scratch.pt
+path: /pscratch/sd/v/vmikuni/datasets
+size: small
+persistent_workers: false
+check_remote: false
+dataset: camels
+mode: generator
+num_classes: 1
+batch: 64
+conditional: true
+num_cond: 2
+save_tag: camels_generation_small_finetune
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs
+use_ema: true
+nsteps: 128

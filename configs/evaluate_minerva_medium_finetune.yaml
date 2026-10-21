@@ -1,0 +1,23 @@
+# From shell/: ./evaluate.sh evaluate_minerva_medium_finetune.yaml
+# Checkpoint: best_model_minerva_medium_finetune.pt
+save_tag: minerva_medium_finetune
+dataset: minerva
+num_feat: 4
+size: medium
+interaction: true
+local_interaction: true
+conditional: true
+num_cond: 16
+use_pid: true
+pid_dim: 8
+use_add: true
+num_add: 5
+num_classes: 5
+mode: classifier
+batch: 256
+path: /pscratch/sd/v/vmikuni/datasets
+check_remote: false
+num_workers: 4
+persistent_workers: false
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

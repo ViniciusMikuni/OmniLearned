@@ -1,0 +1,16 @@
+# From shell/: ./evaluate.sh evaluate_top_large_scratch.yaml
+# Checkpoint: best_model_top_large_scratch.pt
+path: /pscratch/sd/v/vmikuni/datasets
+size: large
+num_workers: 4
+persistent_workers: false
+check_remote: false
+dataset: top
+mode: classifier
+num_classes: 2
+interaction: true
+local_interaction: true
+batch: 16
+save_tag: top_large_scratch
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

@@ -1,0 +1,19 @@
+# From shell/: ./evaluate.sh evaluate_camels_segmentation_small_finetune.yaml
+# Checkpoint: best_model_camels_segmentation_small_finetune.pt
+dataset: camels
+num_feat: 3
+size: small
+num_classes: 2
+num_gen_classes: 3
+mode: segmentation
+batch: 4
+save_tag: camels_segmentation_small_finetune
+interaction_type: astro
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: false
+check_remote: false
+num_coord: 3
+local_interaction: true
+num_workers: 4
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

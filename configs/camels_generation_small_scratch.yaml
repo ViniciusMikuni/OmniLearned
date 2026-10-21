@@ -1,0 +1,22 @@
+# From shell/: ./run.sh camels_generation_small_scratch.yaml
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+dataset: camels
+num_feat: 3
+fine_tune: false
+size: small
+num_classes: 1
+conditional: true
+num_cond: 2
+mode: generator
+save_tag: camels_generation_small_scratch
+num_coord: 3
+batch: 16
+epoch: 300
+iterations: 60
+lr: 3.0e-05
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: true
+check_remote: false
+num_workers: 2
+ema: true
+wandb: false

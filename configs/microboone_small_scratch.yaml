@@ -1,0 +1,22 @@
+# From shell/: ./run.sh microboone_small_scratch.yaml
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+dataset: microboone
+num_feat: 4
+fine_tune: false
+size: small
+local_interaction: false
+interaction: false
+num_coord: 3
+K: 10
+interaction_type: ot
+num_classes: 2
+mode: classifier
+batch: 8
+#save_tag: microboone_small_scratch
+epoch: 30
+lr: 0.0001
+wd: 0.0
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: true
+check_remote: false
+num_workers: 2

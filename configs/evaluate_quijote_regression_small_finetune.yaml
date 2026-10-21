@@ -1,0 +1,18 @@
+# From shell/: ./evaluate.sh evaluate_quijote_regression_small_finetune.yaml
+# Checkpoint: best_model_quijote_regression_small_finetune.pt
+dataset: quijote
+num_feat: 3
+size: small
+num_classes: 2
+mode: regression
+save_tag: quijote_regression_small_finetune
+batch: 2
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: false
+check_remote: false
+num_coord: 3
+local_interaction: true
+interaction_type: astro
+num_workers: 4
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

@@ -1,0 +1,23 @@
+# From shell/: ./run.sh top_medium_scratch.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: false
+fine_tune: false
+size: medium
+num_workers: 4
+persistent_workers: false
+check_remote: false
+ema: false
+dataset: top
+mode: classifier
+num_classes: 2
+interaction: true
+local_interaction: true
+batch: 32
+epoch: 15
+lr: 0.0005
+wd: 0.5
+save_tag: top_medium_scratch
+freeze: false
+lr_factor: 1.0
+wandb: false

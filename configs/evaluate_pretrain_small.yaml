@@ -1,0 +1,19 @@
+# From shell/: ./evaluate.sh evaluate_pretrain_small.yaml
+# Checkpoint: best_model_pretrain_small.pt
+path: /pscratch/sd/v/vmikuni/datasets
+size: small
+num_workers: 4
+persistent_workers: false
+check_remote: false
+dataset: pretrain
+mode: classifier
+save_tag: pretrain_small
+num_classes: 210
+interaction: true
+local_interaction: true
+use_pid: true
+use_add: true
+use_event_loss: true
+batch: 128
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

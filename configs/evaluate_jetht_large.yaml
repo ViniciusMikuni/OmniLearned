@@ -1,0 +1,16 @@
+# From shell/: ./evaluate.sh evaluate_jetht_large.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+size: large
+persistent_workers: false
+check_remote: false
+dataset: jetht_dijet
+num_classes: 210
+interaction: true
+local_interaction: true
+use_pid: true
+use_add: true
+use_event_loss: true
+batch: 16
+save_tag: pretrain_large
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

@@ -1,0 +1,23 @@
+# From shell/: ./run.sh halo_segmentation_small_finetune.yaml
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+dataset: halo
+num_feat: 4
+size: small
+num_classes: 1
+num_gen_classes: 1
+mode: segmentation
+batch: 32
+save_tag: halo_segmentation_small_finetune
+wandb: false
+interaction_type: astro
+epoch: 300
+lr: 0.00003
+wd: 0.0
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: true
+check_remote: false
+num_coord: 3
+local_interaction: true
+fine_tune: true
+pretrain_tag: pretrain_small
+lr_factor: 5.0

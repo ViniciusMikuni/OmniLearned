@@ -20,7 +20,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "torch>=2.5.1",
+    "torch>=2.11,<2.14",
     "numpy>=2.2.4",
     "h5py>=3.13.0",
     "scikit-learn>=1.6.1",
@@ -28,7 +28,7 @@ dependencies = [
     "requests>=2.32.3",
     "pytorch_optimizer>=3.5.0",
     "torchdiffeq>=0.2.5",
-    "diffusers>=0.32.2",
+    "PyYAML>=6.0",
     "typer>=0.15.2",
     "tqdm>=4.67.1",
 
@@ -37,11 +37,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
-    "black>=22.0.0",
-    "isort>=5.10.0",
-    "flake8>=4.0.0",
+    "ruff>=0.11",
     "hatch-vcs>=0.3.0",
 ]
+
+logging = ["wandb>=0.19"]
+examples = ["jupyterlab>=4", "matplotlib>=3.8", "nbformat>=5", "nbclient>=0.10", "ipykernel>=6"]
 
 [project.urls]
 "Homepage" = "https://github.com/ViniciusMikuni/OmniLearned"
@@ -72,6 +73,13 @@ packages = ["src/omnilearned"]
 include = [
     "src/omnilearned",
     "README.md",
+    "shell",
+    "configs",
+    "docs/experiment_commands.md",
+    "examples",
+    "WORKFLOW_GUIDE.md",
+    "PACKAGE_REVIEW.md",
+    "FILE_CHANGES.md",
 ]
 
 [tool.black]
@@ -85,3 +93,9 @@ line_length = 88
 
 [tool.ruff]
 exclude = ["*.ipynb"]
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["remote: public toy download", "cuda: requires CUDA", "distributed: multi-process integration"]

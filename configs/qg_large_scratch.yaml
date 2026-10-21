@@ -1,0 +1,24 @@
+# From shell/: ./run.sh qg_large_scratch.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: false
+fine_tune: false
+size: large
+num_workers: 4
+persistent_workers: false
+check_remote: false
+ema: false
+dataset: qg
+mode: classifier
+num_classes: 2
+interaction: true
+local_interaction: true
+use_pid: true
+batch: 16
+epoch: 15
+lr: 0.0005
+wd: 0.5
+save_tag: qg_large_scratch
+freeze: false
+lr_factor: 1.0
+wandb: false

@@ -1,615 +1,454 @@
+"""Shared training engine for single-device and multi-node runs."""
+
 import json
-import numpy as np
+import math
+import time
+from contextlib import nullcontext
+from pathlib import Path
+
 import torch
-import torch.nn as nn
-from omnilearned.network import PET2
-from omnilearned.dataloader import load_data
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from pytorch_optimizer import Lion, Ranger21
-from diffusers.optimization import get_cosine_schedule_with_warmup
 
-from omnilearned.utils import (
-    is_master_node,
-    ddp_setup,
-    get_param_groups,
-    CLIPLoss,
-    get_checkpoint_name,
-    shadow_copy,
-    get_loss,
-    save_checkpoint,
-    restore_checkpoint,
-    get_model_parameters,
+from omnilearned import checkpoint
+from omnilearned.diffusion import perturb_hl
+from omnilearned.packing import dense_batch
+from omnilearned.runtime import (
+    make_loader,
+    make_model,
+    metadata,
+    seed_everything,
+    to_device,
 )
-
-import time
-import os
-import torch.amp as amp
+from omnilearned.utils import (
+    ddp_setup,
+    get_checkpoint_name,
+    get_loss,
+    get_param_groups,
+    shadow_copy,
+)
 
 torch.set_float32_matmul_precision("high")
 torch._dynamo.config.verbose = False
 
 
-def get_logs(device):
-    logs_buff = torch.zeros((6), dtype=torch.float32, device=device)
-    logs = {}
-    logs["loss"] = logs_buff[0].view(-1)
-    logs["loss_class"] = logs_buff[1].view(-1)
-    logs["loss_gen"] = logs_buff[2].view(-1)
-    logs["loss_clip"] = logs_buff[3].view(-1)
-    logs["loss_class_event"] = logs_buff[4].view(-1)
-    logs["loss_ae"] = logs_buff[5].view(-1)
-    return logs
+def batch_loss(model, batch, c, high_level, logs):
+    if high_level:
+        global_features = batch["cond"]
+        cond = global_features[:, 1 : 1 + c["num_cond"]]
+        x = torch.cat(
+            (global_features[:, :1], global_features[:, 1 + c["num_cond"] :]), -1
+        )
+        if x.shape[-1] != c["num_feat"]:
+            raise ValueError(
+                "num_feat must equal the global feature width minus num_cond"
+            )
+        time = torch.sigmoid(torch.randn(len(x), device=x.device))
+        z, target, _ = perturb_hl(x, time)
+        loss = (model(z, time, cond).float() - target).square().mean()
+        logs.update(loss=loss.detach(), loss_gen=loss.detach())
+        return loss
+    outputs = model(
+        batch["X"],
+        batch["y"],
+        **{
+            k: batch[k]
+            for k in ("cond", "pid", "add_info", "offsets")
+            if batch.get(k) is not None
+        },
+    )
+    return get_loss(
+        outputs,
+        batch["y"],
+        c["mode"],
+        use_event_loss=c.get("use_event_loss", False),
+        use_clip=c.get("use_clip", False),
+        logs=logs,
+        data_pid=(
+            dense_batch(batch)["data_pid"]
+            if batch.get("data_pid") is not None
+            else None
+        ),
+    )
 
 
-def train_step(
+def pass_epoch(
     model,
-    dataloader,
-    class_cost,
-    gen_cost,
-    optimizer,
-    scheduler,
-    mode,
+    loader,
+    c,
     device,
-    clip_loss=CLIPLoss(),
-    use_clip=False,
-    use_event_loss=False,
-    iterations_per_epoch=-1,
-    use_amp=False,
-    gscaler=None,
-    ema_model=None,
-    ema_decay=0.9999,
+    high_level=False,
+    optimizer=None,
+    scheduler=None,
+    scaler=None,
+    ema=None,
 ):
-    model.train()
-
-    logs = get_logs(device)
-
-    if iterations_per_epoch < 0:
-        iterations_per_epoch = len(dataloader)
-
-    data_iter = iter(dataloader)
-
-    for batch_idx in range(iterations_per_epoch):
+    training = optimizer is not None
+    model.train(training)
+    limit = c.get("iterations" if training else "val_iterations", -1)
+    steps = limit if limit >= 0 else len(loader)
+    if len(loader) == 0 or steps == 0:
+        raise ValueError("No batches available for this pass")
+    accum = c.get("grad_accumulation", 1) if training else 1
+    totals, n_events, updates = {}, 0, 0
+    if training:
+        optimizer.zero_grad(set_to_none=True)
+    precision = c.get("precision", "fp32")
+    dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    iterator = iter(loader)
+    for index in range(steps):
         try:
-            batch = next(data_iter)
+            batch = next(iterator)
         except StopIteration:
-            data_iter = iter(dataloader)
-            batch = next(data_iter)
+            iterator = iter(loader)
+            batch = next(iterator)
 
-        # for batch_idx, batch in enumerate(dataloader):
-        optimizer.zero_grad(set_to_none=True)  # Zero the gradients
-
-        X = batch["X"].to(device, dtype=torch.float32)
-        y = batch["y"].to(device)
-
-        model_kwargs = {
-            key: batch[key].to(device)
-            for key in ["cond", "pid", "add_info"]
-            if key in batch and batch[key] is not None
-        }
-
-        if batch.get("data_pid") is not None:
-            data_pid = batch["data_pid"].to(device)
-        else:
-            data_pid = None
-
-        with amp.autocast(
-            "cuda:{}".format(device) if torch.cuda.is_available() else "cpu",
-            enabled=use_amp,
+        batch = to_device(batch, device)
+        logs = {}
+        end = (index + 1) % accum == 0 or index + 1 == steps
+        sync = (
+            model.no_sync()
+            if training and not end and isinstance(model, DDP)
+            else nullcontext()
+        )
+        with (
+            sync,
+            torch.set_grad_enabled(training),
+            torch.autocast(device.type, dtype=dtype, enabled=precision != "fp32"),
         ):
-            outputs = model(X, y, **model_kwargs)
-            loss = get_loss(
-                outputs,
-                y,
-                mode,
-                class_cost,
-                gen_cost,
-                use_event_loss,
-                use_clip,
-                clip_loss,
-                logs,
-                data_pid=data_pid,
+            loss = batch_loss(model, batch, c, high_level, logs)
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"Non-finite loss at batch {index}")
+            if training:
+                group = min(accum, steps - (index // accum) * accum)
+                scaler.scale(loss / group).backward()
+        if training and end:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                c.get("grad_clip", 1.0),
+                error_if_nonfinite=not scaler.is_enabled(),
             )
-
-        if use_amp and gscaler is not None:
-            gscaler.scale(loss).backward()
-            gscaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            gscaler.step(optimizer)
-            gscaler.update()
-        else:
-            loss.backward()  # Backward pass
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()  # Update parameters
-        scheduler.step()
-
-        if ema_model is not None:
-            with torch.no_grad():
-                for ema_p, model_p in zip(
-                    ema_model.parameters(), model.module.parameters()
-                ):
-                    ema_p.mul_(ema_decay).add_(model_p, alpha=1.0 - ema_decay)
-
+            old_scale = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            if scaler.get_scale() >= old_scale:
+                scheduler.step()
+                updates += 1
+                if ema is not None:
+                    with torch.no_grad():
+                        source = checkpoint.unwrap(model)
+                        for a, b in zip(
+                            ema.parameters(), source.parameters(), strict=False
+                        ):
+                            a.lerp_(b, 1 - c.get("ema_decay", 0.999))
+                        for a, b in zip(ema.buffers(), source.buffers(), strict=False):
+                            a.copy_(b)
+            optimizer.zero_grad(set_to_none=True)
+        count = len(batch["y"])
+        for k, v in logs.items():
+            totals[k] = totals.get(k, 0.0) + float(v) * count
+        n_events += count
+    keys = [
+        "loss",
+        "loss_class",
+        "loss_perturbed",
+        "loss_gen",
+        "loss_clip",
+        "loss_ae",
+        "loss_emd",
+        "loss_ot",
+    ]
+    values = torch.tensor(
+        [totals.get(k, 0.0) for k in keys] + [n_events],
+        device=device,
+        dtype=torch.float64,
+    )
     if dist.is_initialized():
-        for key in logs:
-            dist.all_reduce(logs[key].detach())
-            logs[key] = float(logs[key] / dist.get_world_size() / iterations_per_epoch)
-
-    return logs
-
-
-def val_step(
-    model,
-    dataloader,
-    class_cost,
-    gen_cost,
-    mode,
-    device,
-    clip_loss=CLIPLoss(),
-    use_clip=False,
-    use_event_loss=False,
-    iterations_per_epoch=-1,
-):
-    model.eval()
-
-    logs = get_logs(device)
-
-    if iterations_per_epoch < 0:
-        iterations_per_epoch = len(dataloader)
-
-    data_iter = iter(dataloader)
-    for batch_idx in range(iterations_per_epoch):
-        try:
-            batch = next(data_iter)
-        except StopIteration:
-            data_iter = iter(dataloader)
-            batch = next(data_iter)
-
-        X = batch["X"].to(device, dtype=torch.float32, non_blocking=True)
-        y = batch["y"].to(device, non_blocking=True)
-
-        model_kwargs = {
-            key: batch[key].to(device, non_blocking=True)
-            for key in ["cond", "pid", "add_info"]
-            if key in batch and batch[key] is not None
-        }
-
-        if batch.get("data_pid") is not None:
-            data_pid = batch["data_pid"].to(device, non_blocking=True)
-        else:
-            data_pid = None
-
-        with torch.no_grad():
-            outputs = model(X, y, **model_kwargs)
-            get_loss(
-                outputs,
-                y,
-                mode,
-                class_cost,
-                gen_cost,
-                use_event_loss,
-                use_clip,
-                clip_loss,
-                logs,
-                data_pid=data_pid,
-            )
-
-    if dist.is_initialized():
-        for key in logs:
-            dist.all_reduce(logs[key].detach())
-            logs[key] = float(logs[key] / dist.get_world_size() / iterations_per_epoch)
-
-    return logs
+        dist.all_reduce(values)
+    if values[-1] == 0:
+        raise ValueError("No events available for this pass")
+    return {k: float(values[i] / values[-1]) for i, k in enumerate(keys)}, updates
 
 
-def train_model(
-    model,
-    train_loader,
-    val_loader,
-    optimizer,
-    lr_scheduler,
-    mode,
-    num_epochs=1,
-    device="cpu",
-    patience=500,
-    loss_class=nn.CrossEntropyLoss(),
-    loss_gen=nn.MSELoss(),
-    use_clip=False,
-    use_event_loss=False,
-    output_dir="",
-    save_tag="",
-    iterations_per_epoch=-1,
-    epoch_init=0,
-    loss_init=np.inf,
-    use_amp=False,
-    run=None,
-    ema_model=None,
-    ema_decay=0.999,
-):
-    checkpoint_name = get_checkpoint_name(save_tag)
-
-    losses = {
-        "train_loss": [],
-        "val_loss": [],
-    }
-
-    tracker = {"bestValLoss": loss_init, "bestEpoch": epoch_init}
-    if use_amp:
-        gscaler = amp.GradScaler()
-    else:
-        gscaler = None
-    for epoch in range(int(epoch_init), num_epochs):
-        if isinstance(
-            train_loader.sampler, torch.utils.data.distributed.DistributedSampler
-        ):
-            train_loader.sampler.set_epoch(epoch)
-
-        start = time.time()
-        train_logs = train_step(
+def run(high_level=False, **c):
+    local, rank, size = ddp_setup()
+    device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
+    seed_everything(c.get("seed", 42) + rank)
+    if c.get("use_amp"):
+        c["precision"] = (
+            "bf16"
+            if device.type == "cuda" and torch.cuda.is_bf16_supported()
+            else "fp16"
+        )
+    if c.get("precision", "fp32") not in ("fp32", "bf16", "fp16"):
+        raise ValueError("precision must be fp32, bf16 or fp16")
+    if c.get("attention_backend", "auto") not in ("auto", "sdpa", "varlen"):
+        raise ValueError("attention_backend must be auto, sdpa or varlen")
+    if (
+        c.get("grad_accumulation", 1) < 1
+        or c["epoch"] < 1
+        or not 0 <= c.get("ema_decay", 0.999) < 1
+    ):
+        raise ValueError("Invalid epoch, accumulation or EMA decay")
+    model = make_model(c, high_level).to(device)
+    train_loader, val_loader = [
+        make_loader(c, split, rank, size, high_level) for split in ("train", "val")
+    ]
+    outdir = Path(c["outdir"] or ".")
+    outdir.mkdir(parents=True, exist_ok=True)
+    best_path = outdir / get_checkpoint_name(c["save_tag"])
+    latest_path = best_path.with_name(best_path.stem + "_latest.pth")
+    resume = None
+    if c.get("resuming") and c.get("fine_tune"):
+        raise ValueError("resuming and fine_tune are mutually exclusive")
+    if c.get("resuming") or c.get("fine_tune"):
+        path = (
+            latest_path
+            if c.get("resuming")
+            else Path(c["pretrain_path"])
+            if c.get("pretrain_path")
+            else outdir / get_checkpoint_name(c["pretrain_tag"])
+        )
+        if c.get("fine_tune"):
+            if c.get("pretrain_path") and not path.is_file():
+                raise FileNotFoundError(f"Pretrained checkpoint not found: {path}")
+            checkpoint.fetch_pretrained(path)
+        if not path.exists() and c.get("resuming"):
+            path = best_path
+        resume = torch.load(path, map_location="cpu", weights_only=False)
+        checkpoint.load_weights(
             model,
-            train_loader,
-            loss_class,
-            loss_gen,
-            optimizer,
-            lr_scheduler,
-            mode,
-            device,
-            use_clip=use_clip,
-            use_event_loss=use_event_loss,
-            iterations_per_epoch=iterations_per_epoch,
-            use_amp=use_amp,
-            gscaler=gscaler,
-            ema_model=ema_model,
-            ema_decay=ema_decay,
+            resume,
+            fine_tune=c.get("fine_tune", False),
+            checkpoint_path=path,
         )
-        val_logs = val_step(
-            model,
-            val_loader,
-            loss_class,
-            loss_gen,
-            mode,
-            device,
-            use_clip=use_clip,
-            use_event_loss=use_event_loss,
-            iterations_per_epoch=iterations_per_epoch,
-        )
-
-        losses["train_loss"].append(train_logs["loss"])
-        losses["val_loss"].append(val_logs["loss"])
-
-        if is_master_node():
-            print(
-                f"Epoch [{epoch + 1}/{num_epochs}] Loss: {losses['train_loss'][-1]:.4f}, Val Loss: {losses['val_loss'][-1]:.4f} , lr: {lr_scheduler.get_last_lr()[0]}"
-            )
-            print(
-                f"Class Loss: {train_logs['loss_class']:.4f}, Class Val Loss: {val_logs['loss_class']:.4f}"
-            )
-            if use_event_loss:
-                print(
-                    f"Class Event Loss: {train_logs['loss_class_event']:.4f}, Class Event Val Loss: {val_logs['loss_class_event']:.4f}"
-                )
-            print(
-                f"Gen Loss: {train_logs['loss_gen']:.4f}, Gen Val Loss: {val_logs['loss_gen']:.4f}"
-            )
-            if use_clip:
-                print(
-                    f"CLIP loss: {train_logs['loss_clip']:.4f}, CLIP Val Loss: {val_logs['loss_clip']:.4f}"
-                )
-            if mode == "encoder":
-                print(
-                    f"AE loss: {train_logs['loss_ae']:.4f}, AE Val Loss: {val_logs['loss_ae']:.4f}"
-                )
-            print(
-                "Time taken for epoch {} is {} sec".format(epoch, time.time() - start)
-            )
-
-        if losses["val_loss"][-1] < tracker["bestValLoss"]:
-            tracker["bestValLoss"] = losses["val_loss"][-1]
-            tracker["bestEpoch"] = epoch
-
-            if is_master_node():
-                print("replacing best checkpoint ...")
-                save_checkpoint(
-                    model,
-                    ema_model,
-                    epoch + 1,
-                    optimizer,
-                    losses["val_loss"][-1],
-                    lr_scheduler,
-                    output_dir,
-                    checkpoint_name,
-                )
-
-        if run is not None:
-            for key in train_logs:
-                run.log({f"train {key}": train_logs[key]})
-            for key in val_logs:
-                run.log({f"val {key}": val_logs[key]})
-
-        if epoch - tracker["bestEpoch"] > patience:
-            print(f"breaking on device: {device}")
-            break
-
-    if is_master_node():
-        print(
-            f"Training Complete, best loss: {tracker['bestValLoss']:.5f} at epoch {tracker['bestEpoch']}!"
-        )
-        # save losses
-        json.dump(losses, open(f"{output_dir}/training_{save_tag}.json", "w"))
-
-
-def run(
-    outdir: str = "",
-    save_tag: str = "",
-    pretrain_tag: str = "pretrain",
-    dataset: str = "top",
-    path: str = "/pscratch/sd/v/vmikuni/datasets",
-    wandb=False,
-    fine_tune: bool = False,
-    freeze: bool = False,
-    resuming: bool = False,
-    num_feat: int = 4,
-    num_part: int = 150,
-    num_latent: int = 10,
-    model_size: str = "small",
-    interaction: bool = False,
-    local_interaction: bool = False,
-    num_coord: int = 2,
-    K: int = 10,
-    interaction_type: str = "lhc",
-    conditional: bool = False,
-    num_cond: bool = 3,
-    use_pid: bool = False,
-    pid_idx: int = -1,
-    pid_dim: int = 9,
-    use_add: bool = False,
-    num_add: int = 4,
-    zero_add: bool = False,
-    use_clip: bool = False,
-    use_event_loss: bool = False,
-    num_classes: int = 2,
-    num_gen_classes: int = 1,
-    mode: str = "classifier",
-    batch: int = 64,
-    iterations: int = -1,
-    epoch: int = 15,
-    warmup_epoch: int = 1,
-    use_amp: bool = False,
-    optim: str = "lion",
-    sched: str = "cosine",
-    b1: float = 0.95,
-    b2: float = 0.98,
-    lr: float = 5e-4,
-    lr_factor: float = 10.0,
-    wd: float = 0.3,
-    nevts: int = -1,
-    attn_drop: float = 0.1,
-    mlp_drop: float = 0.1,
-    feature_drop: float = 0.0,
-    num_workers: int = 16,
-    clip_inputs: bool = False,
-):
-    local_rank, rank, size = ddp_setup()
-
-    model_params = get_model_parameters(model_size)
-    # set up model
-    model = PET2(
-        input_dim=num_feat,
-        use_int=interaction,
-        local_int=local_interaction,
-        int_type=interaction_type,
-        conditional=conditional,
-        cond_dim=num_cond,
-        pid=use_pid,
-        pid_dim=pid_dim,
-        add_info=use_add,
-        add_dim=num_add,
-        mode=mode,
-        num_classes=num_classes,
-        num_gen_classes=num_gen_classes,
-        mlp_drop=mlp_drop,
-        attn_drop=attn_drop,
-        feature_drop=feature_drop,
-        num_coord=num_coord,
-        K=K,
-        num_particles=num_part,
-        num_latent=num_latent,
-        dataset=dataset,
-        **model_params,
-    )
-
-    if rank == 0:
-        d = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        print("**** Setup ****")
-        print(
-            "Total params: %.2fM"
-            % (sum(p.numel() for p in model.parameters()) / 1000000.0)
-        )
-        print(f"Training on device: {d}, with {size} GPUs")
-        print("************")
-
-    # load in train data
-    train_loader = load_data(
-        dataset,
-        dataset_type="train",
-        use_cond=conditional,
-        use_pid=use_pid,
-        pid_idx=pid_idx,
-        use_add=use_add,
-        num_add=num_add,
-        path=path,
-        batch=batch,
-        num_workers=num_workers,
-        rank=rank,
-        size=size,
-        clip_inputs=clip_inputs,
-        mode=mode,
-        nevts=nevts,
-    )
-    if rank == 0:
-        print("**** Setup ****")
-        print(f"Train dataset len: {len(train_loader)}")
-        print("************")
-
-    val_loader = load_data(
-        dataset,
-        dataset_type="test",
-        use_cond=conditional,
-        use_pid=use_pid,
-        pid_idx=pid_idx,
-        use_add=use_add,
-        num_add=num_add,
-        path=path,
-        batch=batch,
-        num_workers=num_workers,
-        rank=rank,
-        size=size,
-        clip_inputs=clip_inputs,
-        mode=mode,
-    )
-
-    param_groups = get_param_groups(
-        model, wd, lr, lr_factor=lr_factor, fine_tune=fine_tune, freeze=freeze
-    )
-
-    if optim not in ["adam", "lion", "ranger"]:
-        raise ValueError(
-            f"Optimizer '{optim}' not supported. Choose from adam or lion."
-        )
-    if sched not in ["cosine", "onecycle"]:
-        raise ValueError(
-            f"Scheduler '{sched}' not supported. Choose from cosine or onecycle."
-        )
-
-    if optim == "lion":
-        optimizer = Lion(param_groups, betas=(b1, b2))
-    elif optim == "adam":
-        optimizer = torch.optim.AdamW(param_groups)
-    elif optim == "ranger":
-        optimizer = Ranger21(param_groups, num_iterations=(len(train_loader) * epoch))
-
-    train_steps = len(train_loader) if iterations < 0 else iterations
-
-    if sched == "onecycle":
-        lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer=optimizer,
-            total_steps=(train_steps * epoch),
-            max_lr=lr,
-            pct_start=0.1,
-        )
-    elif sched == "cosine":
-        lr_scheduler = get_cosine_schedule_with_warmup(
-            optimizer=optimizer,
-            num_warmup_steps=train_steps * warmup_epoch,
-            num_training_steps=(train_steps * epoch),
-        )
-
-    # Transfer model to GPU if available
-    kwarg = {}
-    if torch.cuda.is_available():
-        device = local_rank
-        model.to(local_rank)
-        kwarg["device_ids"] = [device]
-    else:
-        model.cpu()
-        device = "cpu"
-
-    model = DDP(
+    groups = get_param_groups(
         model,
-        **kwarg,
+        c["wd"],
+        c["lr"],
+        c.get("lr_factor", 1.0),
+        c.get("fine_tune", False),
+        c.get("freeze", False),
     )
+    steps = c["iterations"] if c["iterations"] >= 0 else len(train_loader)
+    if steps < 1:
+        raise ValueError("No training batches; increase data or reduce ranks")
+    updates = math.ceil(steps / c.get("grad_accumulation", 1))
+    total = updates * c["epoch"]
+    if c["optim"] == "adam":
+        optimizer = torch.optim.AdamW(groups)
+    elif c["optim"] == "lion":
+        from pytorch_optimizer import Lion
 
-    # Set up EMA model
-    ema_model = shadow_copy(model.module)
+        optimizer = Lion(groups, betas=(c["b1"], c["b2"]))
+    elif c["optim"] == "ranger":
+        from pytorch_optimizer import Ranger21
 
-    epoch_init = 0
-    loss_init = np.inf
-    checkpoint_name = None
+        optimizer = Ranger21(groups, num_iterations=total)
+    else:
+        raise ValueError("optim must be adam, lion or ranger")
+    if c.get("sched", "cosine") == "cosine":
+        warmup = c.get("warmup_epoch", 0) * updates
 
-    if os.path.isfile(os.path.join(outdir, get_checkpoint_name(save_tag))) and resuming:
-        if is_master_node():
-            print(
-                f"Continue training with checkpoint from {os.path.join(outdir, get_checkpoint_name(save_tag))}"
+        def rate(step):
+            return (
+                step / max(1, warmup)
+                if step < warmup
+                else 0.5
+                * (
+                    1
+                    + math.cos(
+                        math.pi * min(1.0, (step - warmup) / max(1, total - warmup))
+                    )
+                )
             )
-        checkpoint_name = get_checkpoint_name(save_tag)
-        fine_tune = False
 
-    elif fine_tune:
-        if is_master_node():
-            print(
-                f"Will fine-tune using checkpoint {os.path.join(outdir, get_checkpoint_name(pretrain_tag))}"
-            )
-        checkpoint_name = get_checkpoint_name(pretrain_tag)
-
-    if checkpoint_name is not None:
-        epoch_init, loss_init = restore_checkpoint(
-            model,
-            outdir,
-            checkpoint_name,
-            local_rank,
-            is_main_node=is_master_node(),
-            ema_model=ema_model,
-            optimizer=optimizer,
-            lr_scheduler=lr_scheduler,
-            fine_tune=fine_tune,
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, rate)
+    elif c["sched"] == "onecycle":
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=[g["lr"] for g in groups], total_steps=total
         )
-
-    if wandb:
+    else:
+        raise ValueError("sched must be cosine or onecycle")
+    scaler = torch.amp.GradScaler(device.type, enabled=c.get("precision") == "fp16")
+    ema = shadow_copy(model) if c.get("ema", True) else None
+    start, best, step = 0, math.inf, 0
+    if resume is not None and c.get("resuming"):
+        optimizer.load_state_dict(resume["optimizer"])
+        scheduler.load_state_dict(resume["sched"])
+        if resume.get("scaler"):
+            scaler.load_state_dict(resume["scaler"])
+        start, best, step = (
+            resume["epoch"],
+            resume["loss"],
+            resume.get("global_step", 0),
+        )
+        if ema is not None:
+            checkpoint.load_weights(ema, resume, ema=True)
+        if "rng_by_rank" in resume:
+            if len(resume["rng_by_rank"]) != size:
+                raise ValueError("Exact resume requires the same world size")
+            checkpoint.restore_rng(resume["rng_by_rank"][rank])
+    # All ranks participate; sampler sizes can differ for validation.
+    counts = torch.tensor(
+        [len(train_loader.rank_sampler), len(val_loader.rank_sampler)],
+        device=device,
+        dtype=torch.int64,
+    )
+    if dist.is_initialized():
+        dist.all_reduce(counts)
+    if rank == 0:
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(
+            f"Model: {c.get('size', 'high-level')} | parameters: {total_params:,} | trainable: {trainable:,}",
+            flush=True,
+        )
+        for i, (label, loader) in enumerate(
+            (("Train", train_loader), ("Validation", val_loader))
+        ):
+            limit = c.get("iterations" if i == 0 else "val_iterations", -1)
+            batches = limit if limit >= 0 else len(loader)
+            print(
+                f"{label}: {len(loader.dataset):,} indexed events, {len(loader.dataset.file_paths):,} files | "
+                f"selected across {size} ranks: {int(counts[i]):,} | rank 0: {len(loader.rank_sampler):,} events, "
+                f"{len(loader):,} batches | batches/pass: {batches:,}",
+                flush=True,
+            )
+    info = metadata(c, model, train_loader, size, device)
+    if rank == 0:
+        (outdir / f"resolved_{c['save_tag']}.json").write_text(
+            json.dumps(info, indent=2)
+        )
+    tracker = None
+    if c.get("wandb") and rank == 0:
         import wandb
 
-        if is_master_node():
-            mode_wandb = None
-            wandb.login()
-        else:
-            mode_wandb = "disabled"
-
-        run = wandb.init(
-            # Set the project where this run will be logged
-            project="OmniCosmosv2",
-            name=save_tag,
-            mode=mode_wandb,
-            # Track hyperparameters and run metadata
-            config={
-                "learning_rate": lr,
-                "epochs": epoch,
-                "batch size": batch,
-                "mode": mode,
-            },
+        tracker = wandb.init(project="OmniLearned", name=c["save_tag"], config=info)
+    if c.get("compile_model"):
+        model = torch.compile(model)
+    if size > 1:
+        model = DDP(model, device_ids=[local] if device.type == "cuda" else None)
+    history = {"train_loss": [], "val_loss": []}
+    for epoch in range(start, c["epoch"]):
+        start_time = time.time()
+        train_loader.rank_sampler.set_epoch(epoch)
+        train_logs, n = pass_epoch(
+            model,
+            train_loader,
+            c,
+            device,
+            high_level,
+            optimizer,
+            scheduler,
+            scaler,
+            ema,
         )
-    else:
-        run = None
+        val_logs, _ = pass_epoch(
+            checkpoint.unwrap(model), val_loader, c, device, high_level
+        )
+        step += n
+        improved = val_logs["loss"] < best
+        best = min(best, val_logs["loss"])
+        states = [None] * size
+        if size > 1:
+            dist.all_gather_object(states, checkpoint.rng_state())
+        else:
+            states[0] = checkpoint.rng_state()
+        if rank == 0:
+            for path in [latest_path] + ([best_path] if improved else []):
+                checkpoint.save(
+                    path,
+                    model,
+                    ema,
+                    optimizer,
+                    scheduler,
+                    scaler,
+                    epoch + 1,
+                    best,
+                    c,
+                    states,
+                    step,
+                )
+            history["train_loss"].append(train_logs["loss"])
+            history["val_loss"].append(val_logs["loss"])
+            print(
+                f"Epoch [{epoch + 1}/{c['epoch']}] "
+                f"Loss: {train_logs['loss']:.4f}, "
+                f"Val Loss: {val_logs['loss']:.4f}, "
+                f"lr: {scheduler.get_last_lr()[0]:.6g}",
+                flush=True,
+            )
+            print(
+                f"Class Loss: {train_logs['loss_class']:.4f}, "
+                f"Class Val Loss: {val_logs['loss_class']:.4f}"
+            )
+            if c.get("mode") in ("pretrain", "pretrain_regression", "pretrain_decoder"):
+                print(
+                    f"Perturbed Loss: {train_logs['loss_perturbed']:.4f}, "
+                    f"Perturbed Val Loss: {val_logs['loss_perturbed']:.4f}"
+                )
+            if c.get("mode") in (
+                "pretrain",
+                "pretrain_regression",
+                "pretrain_decoder",
+                "generator",
+            ):
+                print(
+                    f"Gen Loss: {train_logs['loss_gen']:.4f}, "
+                    f"Gen Val Loss: {val_logs['loss_gen']:.4f}"
+                )
+            if c.get("use_clip", False):
+                print(
+                    f"CLIP Loss: {train_logs['loss_clip']:.4f}, "
+                    f"CLIP Val Loss: {val_logs['loss_clip']:.4f}"
+                )
+            if c.get("mode") in ["encoder", "pretrain_decoder"]:
+                print(
+                    f"AE Loss: {train_logs['loss_ae']:.4f}, "
+                    f"AE Val Loss: {val_logs['loss_ae']:.4f} | "
+                    f"EMD: {train_logs['loss_emd']:.4f} / {val_logs['loss_emd']:.4f} | "
+                    f"OT: {train_logs['loss_ot']:.4f} / {val_logs['loss_ot']:.4f}"
+                )
+            print(
+                f"Time taken for epoch {epoch + 1}: {time.time() - start_time:.2f} sec",
+                flush=True,
+            )
+            if tracker:
+                from omnilearned.attention import Attention
 
-    if mode == "regression":
-        loss_class = nn.MSELoss(reduction="none")
-    else:
-        loss_class = nn.CrossEntropyLoss(reduction="none")
-
-    if mode == "ftag":
-        loss_gen = nn.CrossEntropyLoss(reduction="none")
-    else:
-        loss_gen = nn.MSELoss(reduction="none")
-
-    train_model(
-        model,
-        train_loader,
-        val_loader,
-        optimizer,
-        lr_scheduler,
-        mode=mode,
-        num_epochs=epoch,
-        device=device,
-        loss_class=loss_class,
-        loss_gen=loss_gen,
-        output_dir=outdir,
-        save_tag=save_tag,
-        use_clip=use_clip,
-        use_event_loss=use_event_loss,
-        iterations_per_epoch=iterations,
-        epoch_init=epoch_init,
-        loss_init=loss_init,
-        use_amp=use_amp,
-        run=run,
-        ema_model=ema_model,
-    )
-
-    dist.destroy_process_group()
+                tracker.log(
+                    {
+                        **{f"train/{k}": v for k, v in train_logs.items()},
+                        **{f"val/{k}": v for k, v in val_logs.items()},
+                        "epoch": epoch + 1,
+                        "global_step": step,
+                        "best_loss": best,
+                        **{
+                            f"lr/group_{i}": g["lr"]
+                            for i, g in enumerate(optimizer.param_groups)
+                        },
+                        "attention_backends": sorted(
+                            {
+                                m.last_backend
+                                for m in checkpoint.unwrap(model).modules()
+                                if isinstance(m, Attention)
+                            }
+                        ),
+                    },
+                    step=step,
+                )
+    if rank == 0:
+        file = outdir / f"training_{c['save_tag']}.json"
+        if c.get("resuming") and file.exists():
+            old = json.loads(file.read_text())
+            history = {k: old[k][:start] + v for k, v in history.items()}
+        file.write_text(json.dumps(history, indent=2))
+        if tracker:
+            tracker.finish()
+        print(f"Training Complete, best loss: {best:.5f}")
+    train_loader.dataset.close()
+    val_loader.dataset.close()
+    if dist.is_initialized():
+        dist.destroy_process_group()
