@@ -1,0 +1,26 @@
+# From shell/: ./run.sh pretrain_decoder_small.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: true
+size: small
+persistent_workers: true
+check_remote: false
+ema: false
+dataset: pretrain
+mode: pretrain_decoder
+save_tag: pretrain_decoder_small
+num_tokens: 10
+num_part: 150
+num_classes: 210
+interaction: true
+local_interaction: true
+use_pid: true
+use_add: true
+use_event_loss: true
+batch: 128
+epoch: 1500
+iterations: 1000
+val_iterations: 500
+lr: 3.0e-05
+feature_drop: 0.1
+wandb: true

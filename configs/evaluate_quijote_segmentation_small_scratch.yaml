@@ -1,0 +1,20 @@
+# From shell/: ./evaluate.sh evaluate_quijote_segmentation_small_scratch.yaml
+# Checkpoint: best_model_quijote_segmentation_small_scratch.pt
+dataset: quijote
+num_feat: 3
+size: small
+num_classes: 2
+num_gen_classes: 3
+mode: segmentation
+save_tag: quijote_segmentation_small_scratch
+local_interaction: true
+num_coord: 3
+K: 20
+interaction_type: astro
+batch: 2
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: false
+check_remote: false
+num_workers: 4
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

@@ -1,0 +1,25 @@
+# From shell/: ./run.sh qg_small_finetune.yaml
+path: /pscratch/sd/v/vmikuni/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: false
+size: small
+num_workers: 4
+persistent_workers: false
+check_remote: false
+ema: false
+dataset: qg
+mode: classifier
+num_classes: 2
+interaction: true
+local_interaction: true
+use_pid: true
+batch: 64
+epoch: 15
+lr: 1.0e-05
+wd: 0.5
+save_tag: qg_small_finetune
+fine_tune: true
+pretrain_tag: pretrain_small
+lr_factor: 5.0
+freeze: false
+wandb: false

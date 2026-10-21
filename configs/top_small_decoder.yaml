@@ -1,0 +1,19 @@
+# From shell/: ./run.sh top_small_decoder.yaml
+path: /pscratch/sd/v/vmikuni/Omnilearned/datasets
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+resuming: false
+size: lite
+persistent_workers: true
+check_remote: false
+ema: false
+dataset: top_decoder
+mode: classifier
+num_classes: 2
+interaction: false
+local_interaction: false
+batch: 64
+epoch: 35
+lr: 0.00005
+wd: 0.0
+save_tag: top_small_decoder
+wandb: false

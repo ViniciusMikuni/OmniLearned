@@ -1,5 +1,7 @@
 # OmniLearned Official Repository
 
+Inside a Slurm allocation, run `cd shell` then `./run.sh top_small_scratch.yaml`. Training settings are in `configs/`; each has a matching evaluation config used with `./evaluate.sh`. Both launchers visibly load `pytorch/2.11` and run `srun`. See [WORKFLOW_GUIDE.md](WORKFLOW_GUIDE.md) for the full config list, fine-tuning, submission and notebooks. [PACKAGE_REVIEW.md](PACKAGE_REVIEW.md) explains the package and flow matching; [FILE_CHANGES.md](FILE_CHANGES.md) compares files with the original upload.
+
 This repository contains the software package necessary to reproduce all the results presented in the OmniLearned paper, as well as intructions on how to use your own dataset! If you find the repository useful, please cite:
 
 ```bibtex
@@ -36,7 +38,7 @@ This repository contains the software package necessary to reproduce all the res
 ## Installation
 
 ```bash
-pip install omnilearned
+python -m pip install -e ".[dev]"
 ```
 
 
@@ -248,7 +250,7 @@ These datasets are open and available from elsewhere, please cite the following 
 
 ## Training:
 
-Examples for different datasets can be found in the ```train.sh``` script. As an example, let's train the small model using the community top tagging dataset
+Examples for different datasets can be found in the ```shell/run.sh``` script. As an example, let's train the small model using the community top tagging dataset
 
 ### Get the data
 
@@ -265,11 +267,12 @@ omnilearned train  -o ./ --save-tag test_training --dataset top --path PATH/TO/Y
 This command will only train the model for a single epoch.
 
 
-Similarly, for multiple GPUs and work nodes with SLURM support you can use the ```train.sh``` example script
+Similarly, for multiple GPUs and work nodes with SLURM support you can use the ```shell/run.sh``` example script
 
 ```bash
 #Inside an interactive SLURM session or in your job submission script
-./train.sh
+cd shell
+./run.sh top_small_scratch.yaml
 ```
 
 To train a generative model instead you simply need to change the ```--mode``` flag to ```generator```. For example:
@@ -368,10 +371,10 @@ In the OmniLearned paper we detail the training of OmniLearned to perform anomal
 The training using cosmological datasets for parameter inference and velocity prediction from galaxy cluster positions can be run using the same standard commands. For example, you can fine-tune a model using the CAMELS dataset with the commands:
 
 ```bash
-omnilearned train  -o ./ --save-tag cosmos_training --dataset camels --path PATH/TO/YOU/STORAGE --size small --epoch 1 --mode regressor --fine-tune --pretrain-tag pretrain_s
+omnilearned train  -o ./ --save-tag cosmos_training --dataset camels --path PATH/TO/YOU/STORAGE --size small --epoch 1 --mode regression --fine-tune --pretrain-tag pretrain_s
 ```
 
-For specific benchmarks released with the OmniCosmos paper see the files ```camels.sh``` and ```quijote.sh```
+For specific benchmarks released with the OmniCosmos paper see the `configs/camels_*.yaml` and `configs/quijote_*.yaml` files. Recorded historical commands are in `docs/experiment_commands.md`.
 
 ### Anomaly Detection
 
@@ -407,3 +410,38 @@ To lint the code, run:
 ruff format .
 ruff check --fix .
 ```
+
+## Decoder training and latent export
+
+Use `--num_tokens 4` (or YAML `num_tokens: 4`) for learned-token count.
+The old `num_latent`, `shuffle_files`, and sampler `block_size` options are removed.
+Training still shuffles events inside each rank's fixed shard; file names remain
+sorted and test evaluation remains sequential.
+
+Both `encoder` and `pretrain_decoder` training use EMD + full-cloud feature-space
+OT + presence BCE for reconstruction, at every multiplicity. There is no clustered
+OT branch above 200 particles. Both transport losses differentiate their Sinkhorn
+iterations by default and use checkpoint recomputation. The default is 20
+iterations per loss; configure `--ot-iterations` or YAML `ot_iterations`.
+Use 100 to restore the previous solve length; smaller values trade convergence
+accuracy for runtime. Neighborhood interaction OT settings are unchanged.
+
+`evaluate --mode decoder` loads the encoder and PET_decoder checkpoint. The output
+HDF5 `data` is replaced with the latent point cloud `(events, num_tokens, num_feat)`.
+Original `global`/`cond` features are retained unchanged. `--mode encoder` uses the
+same export format. Outputs are one file per rank, with `source_file` and
+`source_row` datasets for provenance.
+
+Generator evaluation passes multiplicity to sampling: CAMELS/Quijote use 5000
+particles; other datasets read count/100 from the last global feature. See
+`WORKFLOW_REVIEW.md` for the function map, request checklist and limitations.
+
+
+## Event label convention
+
+Label handling matches the upstream OmniLearned loader: `dataset == "pretrain"`
+keeps stored event `pid` values unchanged. Standalone datasets subtract their
+offset: jetclass 2, jetclass2 12, aspen 200, cms_qcd 201, cms_bsm 202;
+all other datasets subtract zero. This depends only on dataset selection,
+not model mode, and applies to train, validation and test. There is no
+`labels_are_global` flag. Source HDF5 files are never modified.

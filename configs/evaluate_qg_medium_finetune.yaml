@@ -1,0 +1,17 @@
+# From shell/: ./evaluate.sh evaluate_qg_medium_finetune.yaml
+# Checkpoint: best_model_qg_medium_finetune.pt
+path: /pscratch/sd/v/vmikuni/datasets
+size: medium
+num_workers: 4
+persistent_workers: false
+check_remote: false
+dataset: qg
+mode: classifier
+num_classes: 2
+interaction: true
+local_interaction: true
+use_pid: true
+batch: 32
+save_tag: qg_medium_finetune
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

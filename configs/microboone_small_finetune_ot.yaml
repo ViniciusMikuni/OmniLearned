@@ -1,0 +1,24 @@
+# From shell/: ./run.sh microboone_small_finetune_ot.yaml
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+dataset: microboone
+num_feat: 4
+size: small
+local_interaction: false
+num_coord: 3
+K: 10
+interaction_type: ot
+num_classes: 2
+mode: classifier
+batch: 8
+#save_tag: microboone_small_finetune_ot
+pretrain_tag: pretrain_small
+fine_tune: true
+interaction: true
+epoch: 15
+lr: 5.0e-05
+lr_factor: 20.0
+wd: 3.0
+path: /pscratch/sd/v/vmikuni/datasets
+persistent_workers: true
+check_remote: false
+freeze: false

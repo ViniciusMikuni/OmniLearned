@@ -1,3 +1,9 @@
 dist/
 src/omnilearned/_version.py
 __pycache__
+*~
+*.pdf
+*.json
+*job*
+wandb
+jobs

@@ -1,0 +1,18 @@
+# From shell/: ./evaluate.sh evaluate_camels_regression_small_scratch.yaml
+# Checkpoint: best_model_camels_regression_small_scratch.pt
+dataset: camels
+num_feat: 3
+size: small
+num_classes: 2
+mode: regression
+save_tag: camels_regression_small_scratch
+local_interaction: true
+num_coord: 3
+interaction_type: astro
+batch: 64
+persistent_workers: false
+num_workers: 4
+path: /pscratch/sd/v/vmikuni/datasets
+check_remote: false
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

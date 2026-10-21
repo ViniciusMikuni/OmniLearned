@@ -1,0 +1,12 @@
+Processing /workspace/scratch/90624ce2479d/yaml/Omnilearned
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: omnilearned
+  Building wheel for omnilearned (pyproject.toml): started
+  Building wheel for omnilearned (pyproject.toml): finished with status 'done'
+  Created wheel for omnilearned: filename=omnilearned-0.0.0-py3-none-any.whl size=57651 sha256=18e11be14ec642f538d2d58cdc3d99c62a7754e87b1a07c1dd258369caa7e5d3
+  Stored in directory: /tmp/pip-ephem-wheel-cache-lgpzyno1/wheels/da/b8/1d/aaab18e17afb1b5eefde5e928f6ad18df3df256302bca4077d
+Successfully built omnilearned
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: python -m pip install --upgrade pip

@@ -1,0 +1,27 @@
+# From shell/: ./run.sh quijote_regression_small_scratch.yaml
+outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
+dataset: quijote
+num_feat: 3
+fine_tune: false
+size: small
+num_classes: 2
+mode: regression
+save_tag: quijote_regression_small_scratch
+local_interaction: true
+num_coord: 3
+interaction_type: astro
+batch: 4
+iterations: 60
+epoch: 300
+lr: 0.0001
+wd: 0.0
+nevts: -1
+path: /pscratch/sd/v/vmikuni/datasets
+resuming: false
+persistent_workers: false
+check_remote: false
+freeze: false
+lr_factor: 1.0
+num_workers: 4
+wandb: false
+ema: false

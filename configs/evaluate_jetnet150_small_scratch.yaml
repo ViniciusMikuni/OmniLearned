@@ -1,0 +1,17 @@
+# From shell/: ./evaluate.sh evaluate_jetnet150_small_scratch.yaml
+# Checkpoint: best_model_jetnet150_small_scratch.pt
+path: /pscratch/sd/v/vmikuni/datasets
+size: small
+num_workers: 4
+persistent_workers: false
+check_remote: false
+dataset: jetnet150
+mode: generator
+num_classes: 5
+conditional: true
+batch: 64
+save_tag: jetnet150_small_scratch
+indir: /pscratch/sd/v/vmikuni/PET/checkpoints
+outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs
+use_ema: true
+nsteps: 100
