@@ -1109,9 +1109,12 @@ def ddp_setup():
         rank: Unique identifixer of each process
         world_size: Total number of processes
     """
-    if "MASTER_ADDR" not in os.environ:
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "2900"
+    # A launcher (torchrun) sets WORLD_SIZE. MASTER_ADDR is not a reliable signal:
+    # the single-process branch sets it, so a second call in the same process
+    # (train then evaluate) would otherwise take the env:// branch and fail.
+    if "WORLD_SIZE" not in os.environ:
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "2900")
         os.environ["RANK"] = "0"
         init_process_group(rank=0, world_size=1)
         rank = local_rank = 0

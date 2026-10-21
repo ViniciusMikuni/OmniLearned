@@ -3,6 +3,7 @@
 import h5py
 import numpy as np
 import pytest
+import torch
 from typer.testing import CliRunner
 
 from omnilearned.cli import app
@@ -28,8 +29,11 @@ def write_custom_dataset(root, n=96, p=12):
 
 @pytest.mark.parametrize(
     "device",
-    ["cpu", pytest.param("mps", marks=pytest.mark.skipif(not mps_available(),
-                                                         reason="no MPS"))],
+    ["cpu",
+     pytest.param("mps", marks=pytest.mark.skipif(not mps_available(), reason="no MPS")),
+     # CUDA takes the upstream (DDP, world size 1) path.
+     pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(),
+                                                   reason="no CUDA"))],
 )
 def test_train_and_generate_single_process(tmp_path, device):
     write_custom_dataset(tmp_path)
