@@ -49,14 +49,21 @@ training studies and closure reports belong to the application workspace.
 ### Likelihood options
 
 `LikelihoodOptions(solver, nsteps, rtol, atol, divergence, num_probes, probe,
-probe_seed, max_nfe)`. Fixed-step solvers `euler`, `midpoint`, `rk4`;
+probe_seed, probe_schedule, max_nfe)`. Fixed-step solvers `euler`, `midpoint`, `rk4`;
 adaptive `dopri5`, `bosh3`, `adaptive_heun` through torchdiffeq (adaptive
 steps are shared across the rows of a batch). `divergence="exact"` loops over
 real coordinates (reference tests, small clouds); `"hutchinson"` uses
 `num_probes` Rademacher or Gaussian probes per trajectory. Probes are derived
 from `(probe_seed, event_id)` only, per particle index, so they do not depend
 on batching, chunking or padding, and the same event reuses the same probes
-for every candidate (reducing noise in likelihood differences). Integration
+for every candidate (reducing noise in likelihood differences).
+`probe_schedule="per_event"` (default) reuses one probe set at every solver
+evaluation, so the probe error is correlated along the whole path;
+`"per_step"` (fixed-step solvers only) draws independent probes for each
+divergence evaluation from `(probe_seed, event_id, evaluation index)`. It has
+the same expectation and the same cost, and the variance is averaged over the
+path. The midpoint solver evaluates no divergence at its discarded first stage.
+Integration
 runs in float32 on the model device; per-event results are returned as
 float64 on CPU and ensembles are accumulated in float64.
 

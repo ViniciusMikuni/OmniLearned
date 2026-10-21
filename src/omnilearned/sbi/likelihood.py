@@ -38,6 +38,11 @@ class LikelihoodOptions:
     num_probes: int = 4
     probe: str = "rademacher"  # "rademacher" or "gaussian"
     probe_seed: int = 0
+    # "per_event": one probe set per event reused at every solver evaluation
+    # (errors fully correlated along the path). "per_step": independent probes
+    # for every divergence evaluation, derived from (seed, event id, evaluation
+    # index); same expectation, variance averaged over the path. Fixed-step only.
+    probe_schedule: str = "per_event"
     max_nfe: int = 4096
 
     def validate(self):
@@ -49,6 +54,10 @@ class LikelihoodOptions:
             raise ValueError(f"Unknown probe distribution '{self.probe}'")
         if self.divergence == "hutchinson" and self.num_probes < 1:
             raise ValueError("num_probes must be >= 1")
+        if self.probe_schedule not in ("per_event", "per_step"):
+            raise ValueError(f"Unknown probe schedule '{self.probe_schedule}'")
+        if self.probe_schedule == "per_step" and self.solver not in FIXED_STEP_SOLVERS:
+            raise ValueError("probe_schedule='per_step' needs a fixed-step solver")
         if self.solver in FIXED_STEP_SOLVERS:
             nfe = self.nsteps * NFE_PER_STEP[self.solver]
             if nfe > self.max_nfe:
@@ -91,18 +100,23 @@ def frozen_for_inference(model):
             p.requires_grad_(flag)
 
 
-def stable_probes(event_ids, num_particles, num_features, num_probes, seed, kind):
-    """Probe vectors [K, N, P, F] derived only from (seed, event id).
+def stable_probes(event_ids, num_particles, num_features, num_probes, seed, kind,
+                  evaluation=None):
+    """Probe vectors [K, N, P, F] derived only from (seed, event id[, evaluation]).
 
     Particle ``p`` of an event always receives the same probe values, so the
     probes do not depend on batch composition, chunking or padding length.
+    ``evaluation`` (per-step schedule) selects an independent stream for each
+    divergence evaluation along the solver path.
     """
     ids = np.asarray(event_ids, dtype=np.int64).reshape(-1)
     out = np.empty((ids.shape[0], num_particles, num_probes, num_features))
+    tail = [] if evaluation is None else [1, int(evaluation)]
     for i, eid in enumerate(ids):
         u = int(eid) & 0xFFFFFFFFFFFFFFFF
         rng = np.random.Generator(
-            np.random.PCG64(np.random.SeedSequence([int(seed), u >> 32, u & 0xFFFFFFFF]))
+            np.random.PCG64(np.random.SeedSequence([int(seed), u >> 32, u & 0xFFFFFFFF]
+                                                   + tail))
         )
         if kind == "rademacher":
             draw = rng.integers(0, 2, size=(num_particles, num_probes, num_features))
@@ -145,13 +159,27 @@ def _divergence(v, x, mask_f, options, probes):
 
 
 def _rhs_factory(velocity, cond, mask, mask_f, options, probes, counter):
-    def rhs(t, x):
+    """``rhs(t, x, need_div=True) -> (v, div)``.
+
+    ``probes`` is a tensor (same probes for every evaluation) or a callable
+    ``m -> probes`` for the m-th divergence evaluation (per-step schedule).
+    Stages whose divergence the solver discards pass ``need_div=False``.
+    """
+    n_div = [0]
+
+    def rhs(t, x, need_div=True):
         counter[0] += 1
+        if not need_div:
+            with torch.no_grad():
+                tvec = torch.full((x.shape[0],), float(t), device=x.device, dtype=x.dtype)
+                return (velocity(x * mask_f, tvec, cond, mask) * mask_f).detach(), None
+        pr = probes(n_div[0]) if callable(probes) else probes
+        n_div[0] += 1
         with torch.enable_grad():
             x_in = (x * mask_f).detach().requires_grad_(True)
             tvec = torch.full((x.shape[0],), float(t), device=x.device, dtype=x.dtype)
             v = velocity(x_in, tvec, cond, mask) * mask_f
-            div = _divergence(v, x_in, mask_f, options, probes)
+            div = _divergence(v, x_in, mask_f, options, pr)
         return v.detach(), div.detach()
 
     return rhs
@@ -168,7 +196,7 @@ def _fixed_step(rhs, x0, solver, nsteps):
             x = x + h * v
             acc = acc + h * d
         elif solver == "midpoint":
-            v1, _ = rhs(t, x)
+            v1, _ = rhs(t, x, need_div=False)  # first-stage divergence is unused
             v2, d2 = rhs(t + 0.5 * h, x + 0.5 * h * v1)
             x = x + h * v2
             acc = acc + h * d2
@@ -252,15 +280,19 @@ def log_prob(
             raise ValueError("Hutchinson divergence needs event_ids or probes")
         # Each distinct event is drawn once (rows repeat events across candidates).
         uniq, inverse = np.unique(np.asarray(event_ids, dtype=np.int64), return_inverse=True)
-        probes = stable_probes(
-            uniq,
-            x.shape[1],
-            x.shape[2],
-            options.num_probes,
-            options.probe_seed,
-            options.probe,
-        )[:, torch.from_numpy(inverse.reshape(-1))]
-    if probes is not None:
+        rows = torch.from_numpy(inverse.reshape(-1)).to(device)
+
+        def draw(evaluation=None):
+            # Expand to rows on the device: per-step draws happen at every evaluation.
+            return stable_probes(uniq, x.shape[1], x.shape[2], options.num_probes,
+                                 options.probe_seed, options.probe,
+                                 evaluation=evaluation).to(device=device,
+                                                           dtype=x.dtype)[:, rows]
+
+        probes = draw if options.probe_schedule == "per_step" else draw()
+    elif probes is not None:
+        if options.probe_schedule == "per_step":
+            raise ValueError("precomputed probes are per-event; use event_ids for per_step")
         probes = probes.to(device=device, dtype=x.dtype)
 
     counter = [0]
@@ -284,6 +316,7 @@ def log_prob(
         "nsteps": options.nsteps,
         "divergence": options.divergence,
         "num_probes": options.num_probes if options.divergence == "hutchinson" else 0,
+        "probe_schedule": options.probe_schedule if options.divergence == "hutchinson" else None,
         "nfe": counter[0],
         "rows": int(x.shape[0]),
         "nonfinite": int((~finite).sum()),

@@ -257,3 +257,71 @@ def test_exchangeable_base_density_and_sampling():
     # Flow with zero field returns the exchangeable base density.
     lpf, _ = log_prob(ZeroField(), x, mask, base, options=opts(nsteps=2))
     np.testing.assert_allclose(lpf.numpy(), lp, atol=1e-12)
+
+
+def test_per_step_probes_unbiased_and_lower_variance():
+    """Independent probes per divergence evaluation: same expectation, and for a
+    path-constant Jacobian the variance falls by ~ the number of evaluations."""
+    A = np.array([[0.2, 0.5, -0.1], [-0.3, 0.1, 0.4], [0.25, -0.2, -0.3]])
+    x, mask = make_cloud(n=4, n_real=[5, 4, 3, 2])
+    field = LinearField(A, 0.8, 0.0).double()
+    exact = linear_exact_logp(x.numpy(), mask.numpy(), A, 0.8, 0.0, MEANS, STDS)
+    est = {}
+    for schedule in ("per_event", "per_step"):
+        est[schedule] = np.array([
+            log_prob(field, x, mask, BASE, event_ids=np.arange(4),
+                     options=opts(divergence="hutchinson", num_probes=1, probe_seed=s,
+                                  nsteps=16, solver="midpoint",
+                                  probe_schedule=schedule))[0].numpy()
+            for s in range(200)])
+    ref = log_prob(field, x, mask, BASE, options=opts(solver="midpoint", nsteps=16))[0].numpy()
+    np.testing.assert_allclose(ref, exact, atol=1e-3)
+    for schedule, e in est.items():
+        sem = e.std(0) / np.sqrt(len(e))
+        assert np.all(np.abs(e.mean(0) - ref) < 4 * sem + 1e-8), (schedule, e.mean(0) - ref)
+    # 16 midpoint steps -> 16 independent evaluations: std ratio ~ 4.
+    ratio = est["per_event"].std(0) / est["per_step"].std(0)
+    assert np.all(ratio > 2.5), ratio
+
+
+def test_per_step_probes_batch_padding_and_candidate_invariance():
+    torch.manual_seed(3)
+    model = SetFlowVelocity(3, 2, dim=32, depth=2, heads=4).double()
+    torch.nn.init.normal_(model.out.weight, std=0.3)
+    for blk in model.blocks:
+        torch.nn.init.normal_(blk.mod.weight, std=0.1)
+    x, mask = make_cloud(n=8, p=5, n_real=[5, 4, 3, 5, 2, 1, 5, 3], seed=1)
+    cond = torch.randn(8, 2, dtype=torch.float64)
+    ids = np.arange(100, 108)
+    o = opts(divergence="hutchinson", num_probes=2, solver="rk4", nsteps=8,
+             probe_schedule="per_step")
+    full, d = log_prob(model, x, mask, BASE, cond=cond, options=o, event_ids=ids)
+    assert d["probe_schedule"] == "per_step"
+    parts = [log_prob(model, x[s:s + 3], mask[s:s + 3], BASE, cond=cond[s:s + 3],
+                      options=o, event_ids=ids[s:s + 3])[0] for s in range(0, 8, 3)]
+    np.testing.assert_allclose(full.numpy(), torch.cat(parts).numpy(), atol=1e-10)
+    xp = torch.cat([x, torch.zeros(8, 3, 3, dtype=x.dtype)], 1)
+    mp = torch.cat([mask, torch.zeros(8, 3, dtype=torch.bool)], 1)
+    padded, _ = log_prob(model, xp, mp, BASE, cond=cond, options=o, event_ids=ids)
+    np.testing.assert_allclose(full.numpy(), padded.numpy(), atol=1e-10)
+    # Rows repeating an event (candidates) see the same probe sequence: with
+    # identical conditions the rows agree exactly.
+    rep, _ = log_prob(model, x[[2, 2]], mask[[2, 2]], BASE, cond=cond[[2, 2]],
+                      options=o, event_ids=ids[[2, 2]])
+    assert rep[0] == rep[1] == full[2]
+    # A different schedule is a different (independent) estimate.
+    pe, _ = log_prob(model, x, mask, BASE, cond=cond, event_ids=ids,
+                     options=opts(divergence="hutchinson", num_probes=2, solver="rk4",
+                                  nsteps=8))
+    assert not torch.allclose(pe, full)
+
+
+def test_per_step_schedule_validation():
+    with pytest.raises(ValueError):
+        LikelihoodOptions(solver="dopri5", probe_schedule="per_step").validate()
+    with pytest.raises(ValueError):
+        LikelihoodOptions(probe_schedule="per_sample").validate()
+    a = stable_probes([5], 4, 3, 2, seed=11, kind="rademacher", evaluation=0)
+    b = stable_probes([5], 4, 3, 2, seed=11, kind="rademacher", evaluation=1)
+    c = stable_probes([5], 4, 3, 2, seed=11, kind="rademacher")
+    assert not torch.equal(a, b) and not torch.equal(a, c)

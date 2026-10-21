@@ -59,7 +59,8 @@ def test_mps_to_cpu_float64_conversion():
 
 
 @accelerators
-def test_likelihood_matches_cpu(dev):
+@pytest.mark.parametrize("schedule", ["per_event", "per_step"])
+def test_likelihood_matches_cpu(dev, schedule):
     model = _model()
     g = torch.Generator().manual_seed(1)
     x = torch.randn(64, 32, 3, generator=g)
@@ -69,7 +70,7 @@ def test_likelihood_matches_cpu(dev):
     cond = torch.randn(64, 2, generator=g)
     base = GaussianBase([0.1, -0.2, 0.3], [1.0, 0.9, 1.2])
     o = LikelihoodOptions(solver="midpoint", nsteps=16, divergence="hutchinson",
-                          num_probes=2)
+                          num_probes=2, probe_schedule=schedule)
     ids = np.arange(64)
     cpu, _ = log_prob(model, x, mask, base, cond=cond, options=o, event_ids=ids)
     m = model.to(dev)
