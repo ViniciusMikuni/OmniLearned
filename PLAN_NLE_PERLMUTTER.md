@@ -55,8 +55,8 @@ conditioning ideas, not its inference.
   numpy, scipy, h5py, torchdiffeq and hepyy (FastJet 3.5 through cppyy). Do not create or
   modify environments.
 - **Checkout and install:**
-  - `git checkout dev/nle-perlmutter`, then `pip install -e .` only if the user's environment
-    expects it (ask);
+  - `git checkout dev/nle-perlmutter`, then `pip install -e .` into the prepared environment
+    (confirmed by the user);
   - `python -c "import omnilearned.sbi.toy, omnilearned.sbi.likelihood"`.
 - **FastJet:** cppyy's precompiled header must not be rebuilt in a shared environment. Set
   `CLING_STANDARD_PCH=$TMPDIR/cling-$USER/allDict.cxx.pch` per node. Check with
@@ -331,10 +331,22 @@ Only with an approved budget. JEWEL 2.6.0-custom adapter from the omni-sbi-mc ap
   for the fidelity samples.
 - **Fits:** a candidate's cost scales with N × (steps × NFE) × probes. Budget support scans
   at roughly 1–2 k candidates per fit at N = 250, more at 1000.
-- **Request budgets from the user** for:
-  - M1 core-hours;
-  - M2 GPU-hours per backbone;
-  - M5–M6 GPU-hours.
+- **Account and queues** (settled with the user):
+  - Slurm account `alice`, user `ploskon`. Check the exact account string with
+    `sacctmgr show assoc user=$USER format=account,qos` before the first batch job.
+  - Batch jobs: `sbatch -A alice -C gpu ...` (or `-C cpu` for toy generation).
+  - Interactive development: the on-demand interactive QOS, up to 4 h on one GPU node,
+    e.g. `salloc -A alice -C gpu -q interactive -N 1 -t 04:00:00 --gpus 4`. Use it for the
+    smoke chain, debugging and short evaluations; use batch jobs for long training and fits.
+- **Budget:** no fixed cap. Run what the milestones need, but log every job's node-hours in
+  `FINDINGS_NLE.md` (milestone, job id, nodes × hours), and do not launch open-ended sweeps.
+  JEWEL production still needs explicit approval (rule 8).
+- **Storage:** large data, checkpoints and run trees live in the project directory
+  `/global/cfs/cdirs/alice/$USER/jest-nle` (not `$PSCRATCH`, which is purged). Use it as
+  the run root, e.g. `JEST_NLE_ROOT=/global/cfs/cdirs/alice/$USER/jest-nle`, with
+  `data/`, `checkpoints/`, `runs/` and `manifests/` below it. CFS is slower than scratch:
+  read each HDF5 split into memory once per job (2 M jets × 32 × 3 float32 ≈ 0.8 GB), and
+  write checkpoints at a modest cadence. Nothing from this directory is committed.
 
 ## 9. To-do and forks (not in the baseline)
 
@@ -351,9 +363,12 @@ Only with an approved budget. JEWEL 2.6.0-custom adapter from the omni-sbi-mc ap
 4. A **classifier two-sample test** per point as an additional fidelity diagnostic (never a
    replacement for the calibrated gate).
 
-## 10. Questions to settle with the user at start
+## 10. Settled with the user (2026-10-21)
 
-- the Perlmutter account and queue;
-- the per-milestone GPU and CPU budgets;
-- whether `pip install -e .` into the prepared environment is expected;
-- where large data live (`$PSCRATCH` path) and the retention policy.
+- **Account and queue:** account `alice` (user `ploskon`); batch jobs plus the on-demand
+  4 h interactive GPU QOS (section 8).
+- **Budget:** none fixed; run what is needed and log usage (section 8).
+- **Install:** `pip install -e .` into the prepared `henv` environment.
+- **Data:** `/global/cfs/cdirs/alice/$USER/jest-nle` (project directory, not scratch).
+
+Ask the user only for new decisions, JEWEL budget or external blockers.
