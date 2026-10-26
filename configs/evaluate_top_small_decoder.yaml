@@ -11,6 +11,6 @@ num_classes: 2
 interaction: true
 local_interaction: true
 batch: 128
-save_tag: pretrain_decoder_small
+save_tag: top_small_encoder_finetune
 indir: /pscratch/sd/v/vmikuni/PET/checkpoints
 outdir: /pscratch/sd/v/vmikuni/Omnilearned/datasets/top_decoder/val

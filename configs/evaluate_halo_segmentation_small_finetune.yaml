@@ -1,17 +1,19 @@
 # From shell/: ./evaluate.sh evaluate_halo_segmentation_small_finetune.yaml
 # Checkpoint: best_model_halo_segmentation_small_finetune.pt
 dataset: halo
-num_feat: 3
+num_feat: 4
 size: small
 num_classes: 1
-num_gen_classes: 1
+num_gen_classes: 2
 mode: segmentation
-batch: 32
-save_tag: halo_segmentation_small_finetune
+batch: 4
+save_tag: halo_segmentation_small_finetune_v2
 interaction_type: astro
+K: 10
 path: /pscratch/sd/v/vmikuni/datasets
 persistent_workers: false
 num_coord: 3
 local_interaction: true
+interaction: true
 indir: /pscratch/sd/v/vmikuni/PET/checkpoints
 outdir: /pscratch/sd/v/vmikuni/Omnilearned/outputs

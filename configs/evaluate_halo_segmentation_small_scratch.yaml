@@ -9,6 +9,7 @@ mode: segmentation
 batch: 32
 save_tag: halo_segmentation_small_scratch
 interaction_type: astro
+K: 20
 path: /pscratch/sd/v/vmikuni/datasets
 persistent_workers: false
 num_coord: 3

@@ -99,6 +99,36 @@ class CLIPLoss(nn.Module):
         return {"contrastive_loss": total_loss} if output_dict else total_loss
 
 
+def jet_mass_loss(x_hat, x, mask, mask_logits, eps=1e-8):
+    """Massless-constituent approximation; features: deta, dphi, log_pt, log_E."""
+
+    def mass_and_scale(features, weights):
+        # Zero padding before nonlinear operations.
+        features = torch.where(weights[..., None] > 0, features, 0.0)
+        eta, phi, log_pt = features[..., :3].unbind(-1)
+        pt = log_pt.exp() * weights
+
+        energy = (pt * eta.cosh()).sum(-1)
+        px = (pt * phi.cos()).sum(-1)
+        py = (pt * phi.sin()).sum(-1)
+        pz = (pt * eta.sinh()).sum(-1)
+
+        mass2 = energy.square() - px.square() - py.square() - pz.square()
+        mass = (mass2.clamp_min(0) + eps).sqrt()
+        return mass, pt.sum(-1)
+
+    mask = mask.reshape(x.shape[:2]).bool()
+    target_mass, target_scale = mass_and_scale(x, mask.float())
+    pred_mass, _ = mass_and_scale(x_hat, mask_logits.reshape(x_hat.shape[:2]).sigmoid())
+
+    valid = mask.any(-1)
+    scale = target_scale.detach().clamp_min(eps)
+    error = (pred_mass - target_mass) / scale
+
+    per_jet = F.smooth_l1_loss(error, torch.zeros_like(error), reduction="none")
+    return (per_jet * valid).sum() / valid.sum().clamp_min(1)
+
+
 def emd_loss(
     x_hat,
     x,
@@ -465,7 +495,8 @@ def get_loss(
             )
             reconstruction_emd = emd_loss(*args)
             reconstruction_ot = sliced_wasserstein_loss(*args)
-        reconstruction = reconstruction_emd + reconstruction_ot
+            reconstruction_mass = jet_mass_loss(*args)
+        reconstruction = reconstruction_emd + reconstruction_ot + reconstruction_mass
         if logs is not None:
             logs["loss_emd"] = reconstruction_emd.detach()
             logs["loss_ot"] = reconstruction_ot.detach()

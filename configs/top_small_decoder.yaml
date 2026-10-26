@@ -2,18 +2,24 @@
 path: /pscratch/sd/v/vmikuni/Omnilearned/datasets
 outdir: /pscratch/sd/v/vmikuni/PET/checkpoints
 resuming: false
-size: lite
+size: small
 persistent_workers: true
 check_remote: false
 ema: false
+K: 3
 dataset: top_decoder
 mode: classifier
 num_classes: 2
-interaction: false
-local_interaction: false
+interaction: true
+local_interaction: true
+interaction_type: astro
 batch: 64
 epoch: 35
 lr: 0.00005
 wd: 0.0
 save_tag: top_small_decoder
 wandb: false
+fine_tune: true
+pretrain_tag: pretrain_small
+lr_factor: 5.0
+
