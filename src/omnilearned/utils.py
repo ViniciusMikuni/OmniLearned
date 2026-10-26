@@ -98,13 +98,13 @@ class CLIPLoss(nn.Module):
             total_loss = total_loss.mean()
         return {"contrastive_loss": total_loss} if output_dict else total_loss
 
+
 def jet_mass_loss(x_hat, x, mask, mask_logits, eps=1e-8):
     """Massless-constituent approximation; features: deta, dphi, log_pt, log_E."""
+
     def mass_and_scale(features, weights):
         # Zero padding before nonlinear operations.
-        features = torch.where(
-            weights[..., None] > 0, features, 0.0
-        )
+        features = torch.where(weights[..., None] > 0, features, 0.0)
         eta, phi, log_pt = features[..., :3].unbind(-1)
         pt = log_pt.exp() * weights
 
@@ -119,18 +119,15 @@ def jet_mass_loss(x_hat, x, mask, mask_logits, eps=1e-8):
 
     mask = mask.reshape(x.shape[:2]).bool()
     target_mass, target_scale = mass_and_scale(x, mask.float())
-    pred_mass, _ = mass_and_scale(
-        x_hat, mask_logits.reshape(x_hat.shape[:2]).sigmoid()
-    )
+    pred_mass, _ = mass_and_scale(x_hat, mask_logits.reshape(x_hat.shape[:2]).sigmoid())
 
     valid = mask.any(-1)
     scale = target_scale.detach().clamp_min(eps)
     error = (pred_mass - target_mass) / scale
 
-    per_jet = F.smooth_l1_loss(
-        error, torch.zeros_like(error), reduction="none"
-    )
+    per_jet = F.smooth_l1_loss(error, torch.zeros_like(error), reduction="none")
     return (per_jet * valid).sum() / valid.sum().clamp_min(1)
+
 
 def emd_loss(
     x_hat,
