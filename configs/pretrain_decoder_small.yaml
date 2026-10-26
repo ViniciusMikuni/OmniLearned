@@ -9,7 +9,7 @@ ema: false
 dataset: pretrain
 mode: pretrain_decoder
 save_tag: pretrain_decoder_small
-num_tokens: 10
+num_tokens: 4
 num_part: 150
 num_classes: 210
 interaction: true

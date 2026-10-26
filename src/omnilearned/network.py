@@ -312,17 +312,22 @@ class PET_decoder(nn.Module):
     ):
         super().__init__()
 
+        if base_dim % num_heads:
+            raise ValueError("base_dim must be divisible by num_heads")
+
         self.input_dim = input_dim
         self.base_dim = base_dim
         self.num_particles = num_particles
         self.num_features = num_features
+        self.num_heads = num_heads
+        self.head_dim = base_dim // num_heads
 
-        self.input_proj = nn.Linear(
-            input_dim,
-            base_dim,
+        # Existing modules: names and shapes are preserved.
+        self.input_proj = nn.Linear(input_dim, base_dim)
+
+        self.particle_token = nn.Parameter(
+            torch.zeros(1, num_particles, base_dim)
         )
-
-        self.particle_token = nn.Parameter(torch.zeros(1, num_particles, base_dim))
 
         self.in_blocks = nn.ModuleList(
             [
@@ -352,37 +357,119 @@ class PET_decoder(nn.Module):
         self.out = nn.Linear(base_dim, num_features)
         self.mask_out = nn.Linear(base_dim, 1)
 
+        # New decoder-only modules.
+        # One angular anchor per latent token.
+        self.anchor_head = nn.Linear(base_dim, 2)
+
+        # Provisional angular position of each output particle.
+        self.position_head = nn.Linear(base_dim, 2)
+
+        self.group_query_norm = nn.LayerNorm(base_dim)
+        self.group_context_norm = nn.LayerNorm(base_dim)
+
+        self.group_q = nn.Linear(base_dim, base_dim)
+        self.group_k = nn.Linear(base_dim, base_dim)
+        self.group_v = nn.Linear(base_dim, base_dim)
+        self.group_out = nn.Linear(base_dim, base_dim)
+
+        self.group_attn_drop = attn_drop
+
+        # T has units of squared angular distance.
+        self.log_group_temperature = nn.Parameter(
+            torch.tensor(0.25).log()
+        )
+
+        # Zero contribution initially: preserves the old forward behavior.
+        self.group_gate = nn.Parameter(torch.zeros(()))
+
         self.initialize_weights()
 
     def initialize_weights(self):
-        def _init_weights(m):
-            if isinstance(m, nn.Linear):
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+        def _init_weights(module):
+            if isinstance(module, nn.Linear):
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
 
         self.apply(_init_weights)
         nn.init.normal_(self.particle_token, std=0.02)
 
+        # Small initial angular offsets.
+        nn.init.normal_(self.anchor_head.weight, std=0.02)
+        nn.init.normal_(self.position_head.weight, std=0.02)
+
     def forward(self, c):
-        B = c.shape[0]
+        B, K, _ = c.shape
         context = self.input_proj(c)
 
         particles = self.particle_token.expand(B, -1, -1)
 
-        # particle tokens first, because TokenAttBlock updates first num_tokens
+        # Original decoder pathway.
         x = torch.cat([particles, context], dim=1)
-
         for blk in self.in_blocks:
             x = blk(x)
 
-        x = x[:, : self.num_particles]
-        x = self.fc(x)
+        particles = x[:, :self.num_particles]
 
+        # Anchors and provisional positions: (delta eta, delta phi).
+        anchors = self.anchor_head(context)          # (B, K, 2)
+        positions = self.position_head(particles)    # (B, M, 2)
+
+        # Calculate geometry in FP32, including under AMP.
+        with torch.autocast(device_type=c.device.type, enabled=False):
+            delta = (
+                positions.float().unsqueeze(2)
+                - anchors.float().unsqueeze(1)
+            )                                       # (B, M, K, 2)
+
+            deta = delta[..., 0]
+            dphi = torch.atan2(
+                delta[..., 1].sin(),
+                delta[..., 1].cos(),
+            )
+            distance2 = deta.square() + dphi.square()
+
+            temperature = (
+                self.log_group_temperature.float()
+                .clamp(-9.0, 5.0)
+                .exp()
+            )
+            attention_bias = -distance2 / temperature
+
+        q = self.group_q(self.group_query_norm(particles))
+        normalized_context = self.group_context_norm(context)
+        k = self.group_k(normalized_context)
+        v = self.group_v(normalized_context)
+
+        q = q.reshape(
+            B, self.num_particles, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        k = k.reshape(
+            B, K, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        v = v.reshape(
+            B, K, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+
+        grouped = torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attention_bias[:, None].to(q.dtype),
+            dropout_p=self.group_attn_drop if self.training else 0.0,
+        )
+        grouped = grouped.transpose(1, 2).reshape(
+            B, self.num_particles, self.base_dim
+        )
+
+        particles = particles + (
+            self.group_gate.tanh() * self.group_out(grouped)
+        )
+
+        x = self.fc(particles)
         x_hat = self.out(x)
         mask_logits = self.mask_out(x).squeeze(-1)
 
         return x_hat, mask_logits
-
 
 class PET_classifier(nn.Module):
     def __init__(

@@ -46,6 +46,13 @@ def append(group, name, value):
     data[start:] = value
 
 
+def copy_global(source, row, target):
+    """Copy an original event's global metadata without reshaping or masking."""
+    if "global" in source:
+        append(target, "global", source["global"][row : row + 1])
+        target["global"].attrs.update(source["global"].attrs)
+
+
 def export_npz(source, destination):
     with zipfile.ZipFile(
         destination, "w", compression=zipfile.ZIP_STORED, allowZip64=True
@@ -210,7 +217,7 @@ def run(**c):
                             **model_inputs(batch),
                         )
                         prediction = (
-                            output["z_pred"]
+                            output["z_pred"].chunk(2, dim=-1)[0]
                             if mode == "segmentation"
                             else output["latent"]
                         )
@@ -285,17 +292,13 @@ def run(**c):
                     )
                 elif tabular:
                     results.update(prediction=prediction.cpu(), pid=batch["y"].cpu())
-                    conds = []
-                    for fid, row in rows:
-                        source = loader.dataset._get_file(fid)
-                        if "global" in source:
-                            conds.append(source["global"][row])
-                    if conds:
-                        results["cond"] = np.asarray(conds)
                 if tabular:
                     results.update(file_id=raw["file_id"], row_id=raw["row_id"])
                     for name, value in results.items():
                         append(spool, name, value)
+                    # Output metadata is independent of model conditioning.
+                    for fid, row in rows:
+                        copy_global(loader.dataset._get_file(fid), row, spool)
                     continue
                 for i, (fid, row) in enumerate(rows):
                     source = loader.dataset._get_file(fid)
@@ -314,6 +317,9 @@ def run(**c):
                         width,
                         c,
                     )
+                    fields.pop("global", None)
+                    fields.pop("cond", None)
+                    copy_global(source, row, target)
                     fields.update(
                         source_file=np.asarray(
                             [sources[fid]], dtype=h5py.string_dtype()
@@ -325,10 +331,6 @@ def run(**c):
                         if name in source:
                             target[name].attrs.update(source[name].attrs)
             if spool is not None and "prediction" in spool:
-                if "cond" not in spool:
-                    spool.create_dataset(
-                        "cond", data=np.empty((len(spool["prediction"]), 0), np.float32)
-                    )
                 export_npz(spool, outdir / f"{stem}.npz")
         print(f"Evaluation complete: {outdir}")
     finally:
