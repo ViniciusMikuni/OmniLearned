@@ -1,7 +1,5 @@
 # OmniLearned Official Repository
 
-Inside a Slurm allocation, run `cd shell` then `./run.sh top_small_scratch.yaml`. Training settings are in `configs/`; each has a matching evaluation config used with `./evaluate.sh`. Both launchers visibly load `pytorch/2.11` and run `srun`. See [WORKFLOW_GUIDE.md](WORKFLOW_GUIDE.md) for the full config list, fine-tuning, submission and notebooks. [PACKAGE_REVIEW.md](PACKAGE_REVIEW.md) explains the package and flow matching; [FILE_CHANGES.md](FILE_CHANGES.md) compares files with the original upload.
-
 This repository contains the software package necessary to reproduce all the results presented in the OmniLearned paper, as well as intructions on how to use your own dataset! If you find the repository useful, please cite:
 
 ```bibtex
