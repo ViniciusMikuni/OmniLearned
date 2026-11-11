@@ -10,12 +10,12 @@ import torch.distributed as dist
 from omnilearned.diffusion import generate_hl
 from omnilearned.evaluate import append, load_for_evaluation
 from omnilearned.runtime import seed_everything
-from omnilearned.utils import ddp_setup
+from omnilearned.utils import ddp_setup, select_device
 
 
 def run(**c):
     local, rank, size = ddp_setup()
-    device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
+    device = select_device(local)
     seed_everything(c["seed"] + rank)
     model = load_for_evaluation(c, device, high_level=True)
     with np.load(Path(c["path"]) / c["condition_file"]) as data:
