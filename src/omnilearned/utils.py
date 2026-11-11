@@ -371,6 +371,18 @@ def ddp_setup():
     return local, rank, size
 
 
+def select_device(local):
+    """Pick the accelerator device for this rank: CUDA, then Apple Silicon's
+    MPS, then CPU. train.py/evaluate.py/evaluate_hl.py previously checked
+    only torch.cuda.is_available() and otherwise hardcoded "cpu", so Apple
+    Silicon GPUs went unused even when available."""
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{local}")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
 def get_param_groups(model, wd, lr, lr_factor=1.0, fine_tune=False, freeze=False):
     groups = {}
     for name, p in model.named_parameters():

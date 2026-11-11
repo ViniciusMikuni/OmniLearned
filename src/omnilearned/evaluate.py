@@ -16,7 +16,7 @@ from omnilearned.data_spec import FeatureLayout, multiplicity_counts
 from omnilearned.diffusion import estimate_max_logp, generate
 from omnilearned.packing import dense_batch
 from omnilearned.runtime import make_loader, make_model, seed_everything, to_device
-from omnilearned.utils import ddp_setup, get_checkpoint_name
+from omnilearned.utils import ddp_setup, get_checkpoint_name, select_device
 
 
 class BatchProgress(tqdm):
@@ -156,7 +156,7 @@ def generated_fields(source, row, prediction, i, counts, width, c):
 
 def run(**c):
     local, rank, size = ddp_setup()
-    device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
+    device = select_device(local)
     seed_everything(c.get("seed", 42) + rank)
     mode, sbi = c["mode"], c.get("sbi", False)
     if mode not in ("classifier", "regression", "segmentation", "generator", "encoder"):

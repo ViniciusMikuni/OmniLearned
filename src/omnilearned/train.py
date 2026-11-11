@@ -25,6 +25,7 @@ from omnilearned.utils import (
     get_checkpoint_name,
     get_loss,
     get_param_groups,
+    select_device,
     shadow_copy,
 )
 
@@ -173,7 +174,7 @@ def pass_epoch(
 
 def run(high_level=False, **c):
     local, rank, size = ddp_setup()
-    device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
+    device = select_device(local)
     seed_everything(c.get("seed", 42) + rank)
     if c.get("use_amp"):
         c["precision"] = (
